@@ -1,19 +1,96 @@
-# telenews-analyzer
+# TelTrends
 
-структура Проекта
+Система real-time сбора и анализа новостей на основе данных из Telegram с использованием Big Data инструментов.
 
+## О проекте
+
+TelTrends анализирует русскоязычный контент из Telegram-каналов, выявляет тренды и позволяет отслеживать ключевые темы в информационном пространстве. Система работает в режиме реального времени, обеспечивая актуальные данные и аналитику.
+
+### Ключевые возможности
+
+- Автоматический сбор сообщений из русскоязычных Telegram-каналов
+- Выявление и отслеживание трендов в информационном пространстве
+- Мониторинг по ключевым словам и фразам
+- Аналитический дашборд для визуализации данных
+
+## Технический стек
+
+- **Язык программирования**: Python 3.11
+- **Сбор данных**: Telegram API (Telethon)
+- **Обработка потоков**: Apache Kafka
+- **Хранение данных**: MongoDB, PostgreSQL
+- **Обработка текста**: Python NLP библиотеки
+- **API**: FastAPI
+- **Инфраструктура**: Docker, Яндекс.Облако
+
+## Структура проекта
+
+```
 /
-├── docker-compose.yml
-├── .env.example
-├── README.md
-├── src/
-│   ├── collector/  # модуль сбора Telegram
-│   ├── processor/  # модуль обработки текста
-│   ├── api/        # модуль API
-│   └── common/     # общие компоненты
-├── infrastructure/
-│   ├── postgres/
-│   ├── mongo/
-│   └── kafka/
-└── scripts/
-    └── setup.sh
+├── docker-compose.yml    # Конфигурация Docker-контейнеров
+├── .env.example          # Пример файла с переменными окружения
+├── README.md             # Документация проекта
+├── src/                  # Исходный код
+│   ├── collector/        # Модуль сбора данных из Telegram
+│   ├── processor/        # Модуль обработки и анализа текста
+│   ├── api/              # REST API и веб-интерфейс
+│   └── common/           # Общие компоненты и утилиты
+├── infrastructure/       # Конфигурации инфраструктуры
+│   ├── postgres/         # Настройки PostgreSQL
+│   ├── mongo/            # Настройки MongoDB
+│   └── kafka/            # Настройки Kafka
+└── scripts/              # Вспомогательные скрипты
+    └── setup.sh          # Скрипт настройки окружения
+```
+
+## Запуск проекта
+
+### Предварительные требования
+
+- Docker и Docker Compose
+- Python 3.11+
+- Доступ к Telegram API (api_id и api_hash)
+
+### Настройка окружения
+
+1. Клонировать репозиторий:
+   ```bash
+   git clone https://github.com/yourusername/teltrends.git
+   cd teltrends
+   ```
+
+2. Создать файл .env на основе .env.example и заполнить необходимыми значениями:
+   ```bash
+   cp .env.example .env
+   # Отредактировать .env файл
+   ```
+
+3. Запустить проект:
+   ```bash
+   docker-compose up -d
+   ```
+
+## Стандарт коммитов
+
+Проект использует следующий формат коммитов:
+
+```
+тип(область): краткое описание
+```
+
+Где:
+- **тип**: feat, fix, refactor, docs, test, chore
+- **область**: компонент проекта (collector, processor, storage, api)
+
+Примеры:
+- `feat(collector): add telegram channels subscription`
+- `fix(storage): prevent duplicate messages in MongoDB`
+
+## Команда разработки
+
+- Менеджер продукта(Claude 3.7 Sonnet)
+- Дата-инженер(Yussdan)
+
+## Лицензия
+
+[MIT License](LICENSE)
