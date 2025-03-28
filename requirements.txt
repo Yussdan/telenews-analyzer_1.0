@@ -1,0 +1,10 @@
+telethon==1.24.0
+fastapi==0.70.0
+uvicorn==0.15.0
+motor==2.5.1
+asyncpg==0.30.0
+aiokafka==0.7.2
+nltk==3.6.5
+pymystem3==0.2.0
+pydantic==1.8.2
+python-dotenv==0.19.2
