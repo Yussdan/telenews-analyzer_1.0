@@ -1,6 +1,7 @@
 version: '3.8'
 
 services:
+  # Database services
   postgres:
     image: postgres:14
     environment:
@@ -22,12 +23,11 @@ services:
     ports:
       - "27017:27017"
       
+  # Kafka services
   zookeeper:
     image: confluentinc/cp-zookeeper:7.0.1
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
-    ports:
-      - "2181:2181"
     
   kafka:
     image: confluentinc/cp-kafka:7.0.1
@@ -42,6 +42,37 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
     ports:
       - "29092:29092"
+  
+  # Application services
+  collector:
+    build:
+      context: ./teltrends-collector
+    ports:
+      - "8000:8000"
+    environment:
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+    volumes:
+      - ./telegram_session:/app/telegram_session
+    depends_on:
+      - kafka
+  
+  processor:
+    build:
+      context: ./teltrends-processor
+    ports:
+      - "8001:8001"
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - POSTGRES_HOST=postgres
+      - MONGO_HOST=mongodb
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    depends_on:
+      - kafka
+      - postgres
+      - mongodb
+      - collector
 
 volumes:
   postgres_data:

@@ -26,21 +26,37 @@ TelTrends анализирует русскоязычный контент из 
 ## Структура проекта
 
 ```
-/
-├── docker-compose.yml    # Конфигурация Docker-контейнеров
-├── .env.example          # Пример файла с переменными окружения
-├── README.md             # Документация проекта
-├── src/                  # Исходный код
-│   ├── collector/        # Модуль сбора данных из Telegram
-│   ├── processor/        # Модуль обработки и анализа текста
-│   ├── api/              # REST API и веб-интерфейс
-│   └── common/           # Общие компоненты и утилиты
-├── infrastructure/       # Конфигурации инфраструктуры
-│   ├── postgres/         # Настройки PostgreSQL
-│   ├── mongo/            # Настройки MongoDB
-│   └── kafka/            # Настройки Kafka
-└── scripts/              # Вспомогательные скрипты
-    └── setup.sh          # Скрипт настройки окружения
+teltrends-collector/
+├── src/
+│   ├── api/
+│   │   ├── __init__.py
+│   │   └── routes.py
+│   ├── collector/
+│   │   ├── __init__.py
+│   │   ├── telegram_client.py
+│   │   ├── message_processor.py
+│   │   └── channel_manager.py
+│   ├── kafka/
+│   │   ├── __init__.py
+│   │   └── producer.py
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── channel.py
+│   │   └── message.py
+│   ├── config/
+│   │   ├── __init__.py
+│   │   └── settings.py
+│   ├── utils/
+│   │   ├── __init__.py
+│   │   └── logging.py
+│   ├── __init__.py
+│   └── main.py
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+├── .env.example
+├── .gitignore
+└── README.md
 ```
 
 ## Запуск проекта
