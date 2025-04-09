@@ -11,14 +11,14 @@ from topic_modeling import TopicModeler
 from sentiment_analysis import SentimentAnalyzer
 
 # MongoDB settings
-# MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://mongodb:27017")
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://mongodb:27017")
+#MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
 MONGODB_DB = os.getenv("MONGODB_DB", "telegram_news")
 MESSAGES_COLLECTION = "messages"
 
 # Elasticsearch settings
-# ELASTICSEARCH_HOST = os.getenv("ELASTICSEARCH_HOST", "elasticsearch")
-ELASTICSEARCH_HOST = os.getenv("ELASTICSEARCH_HOST", "localhost")
+ELASTICSEARCH_HOST = os.getenv("ELASTICSEARCH_HOST", "elasticsearch")
+# ELASTICSEARCH_HOST = os.getenv("ELASTICSEARCH_HOST", "localhost")
 ELASTICSEARCH_PORT = os.getenv("ELASTICSEARCH_PORT", "9200")
 ELASTICSEARCH_INDEX = "telegram_news"
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "20"))
