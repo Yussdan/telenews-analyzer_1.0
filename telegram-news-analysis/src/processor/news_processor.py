@@ -65,62 +65,68 @@ class NewsProcessor:
                 self.es.indices.create(
                     index=ELASTICSEARCH_INDEX,
                     body={
-                    "settings": {
-                        "number_of_shards": 1,
-                        "number_of_replicas": 0,
-                        "analysis": {
-                            "analyzer": {
-                                "russian_analyzer": {
-                                    "type": "custom",
-                                    "tokenizer": "standard",
-                                    "filter": ["lowercase", "russian_stop", "russian_stemmer"]
-                                }
-                            },
-                            "filter": {
-                                "russian_stop": {
-                                    "type": "stop",
-                                    "stopwords": "_russian_"
+                        "settings": {
+                            "number_of_shards": 1,
+                            "number_of_replicas": 0,
+                            "analysis": {
+                                "analyzer": {
+                                    "russian_analyzer": {
+                                        "type": "custom",
+                                        "tokenizer": "standard",
+                                        "filter": ["lowercase", "russian_stop", "russian_stemmer"]
+                                    }
                                 },
-                                "russian_stemmer": {
-                                    "type": "stemmer",
-                                    "language": "russian"
+                                "filter": {
+                                    "russian_stop": {
+                                        "type": "stop",
+                                        "stopwords": "_russian_"
+                                    },
+                                    "russian_stemmer": {
+                                        "type": "stemmer",
+                                        "language": "russian"
+                                    }
                                 }
                             }
-                        }
-                    },
-                    "mappings": {
-                        "properties": {
-                            "message_id": {"type": "integer"},
-                            "channel_id": {"type": "keyword"},
-                            "channel_name": {"type": "keyword"},
-                            "date": {"type": "date"},
-                            "text": {
-                                "type": "text",
-                                "analyzer": "russian_analyzer"
-                            },
-                            "entities": {
-                                "type": "nested",
-                                "properties": {
-                                    "entity": {"type": "keyword"},
-                                    "type": {"type": "keyword"}
-                                }
-                            },
-                            "sentiment": {
-                                "properties": {
-                                    "label": {"type": "keyword"},
-                                    "score": {"type": "float"}
-                                }
-                            },
-                            "topics": {
-                                "type": "keyword"
-                            },
-                            "has_media": {"type": "boolean"},
-                            "views": {"type": "integer"},
-                            "forwards": {"type": "integer"}
+                        },
+                        "mappings": {
+                            "properties": {
+                                "message_id": {"type": "integer"},
+                                "channel_id": {"type": "keyword"},
+                                "channel_name": {
+                                    "type": "text",
+                                    "fields": {
+                                        "keyword": {"type": "keyword"}
+                                    }
+                                },
+                                "date": {"type": "date"},
+                                "text": {
+                                    "type": "text",
+                                    "analyzer": "russian_analyzer"
+                                },
+                                "entities": {
+                                    "type": "nested",
+                                    "properties": {
+                                        "entity": {"type": "keyword"},
+                                        "type": {"type": "keyword"}
+                                    }
+                                },
+                                "sentiment": {
+                                    "properties": {
+                                        "label": {"type": "keyword"},
+                                        "score": {"type": "float"}
+                                    }
+                                },
+                                "topics": {
+                                    "type": "keyword"
+                                },
+                                "has_media": {"type": "boolean"},
+                                "views": {"type": "integer"},
+                                "forwards": {"type": "integer"}
+                            }
                         }
                     }
-                }
-            )
+                )
+
                 logger.info(f"Created Elasticsearch index: {ELASTICSEARCH_INDEX}")
         except Exception as e:
             logger.error(f"Failed to create Elasticsearch index: {e}")

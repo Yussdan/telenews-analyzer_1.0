@@ -63,27 +63,40 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             skip = int(request.args.get('skip', 0))
             channel = request.args.get('channel')
             
+            logger.info(f"User ID: {user_id}, channels: {user_channels}")
             # Построение запроса к Elasticsearch
             query = {
                 "sort": [{"date": {"order": "desc"}}],
                 "size": limit,
                 "from": skip
             }
+
+            logger.info(f"Query to ES: {query}")
             
             # Добавляем фильтр по каналам, если указан конкретный канал или есть каналы пользователя
             if channel:
                 if channel not in user_channels:
                     return jsonify({"error": "Channel not available for user"}), 403
                 query["query"] = {
-                    "term": {"channel_name.keyword": channel}
+                    "term": {"channel_name": channel}
                 }
             elif user_channels:  # Фильтр по всем каналам пользователя
                 query["query"] = {
-                    "terms": {"channel_name.keyword": user_channels}
+                    "terms": {"channel_name": user_channels}
                 }
-            
-            result = es.search(index=app.config['ELASTICSEARCH_INDEX'], body=query)
-            
+            else:
+                # Если ни конкретный канал, ни каналы пользователя не определены, доступ запрещён
+                return jsonify({"error": "No channels available for the user"}), 403
+
+            logger.info(f"Query to ES: {query}")
+
+            # Выполняем запрос к Elasticsearch только если канал был задан правильно
+            try:
+                result = es.search(index=app.config['ELASTICSEARCH_INDEX'], body=query)
+            except Exception as e:
+                logger.error(f"Elasticsearch query failed: {e}")
+                return jsonify({"error": "Elasticsearch query failed"}), 500
+                        
             news = []
             for hit in result['hits']['hits']:
                 item = hit['_source']
@@ -171,7 +184,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                 "query": {
                     "bool": {
                         "must": [
-                            {"terms": {"channel_name.keyword": user_channels}},
+                            {"terms": {"channel_name": user_channels}},
                             {
                                 "range": {
                                     "date": {
@@ -186,7 +199,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                 "aggs": {
                     "topics": {
                         "terms": {
-                            "field": "topics.keyword",
+                            "field": "topics",
                             "size": 20
                         }
                     },
@@ -283,7 +296,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     "aggs": {
                         "channels": {
                             "terms": {
-                                "field": "channel_name.keyword",
+                                "field": "channel_name",
                                 "size": 100,
                                 "include": channel_names
                             },

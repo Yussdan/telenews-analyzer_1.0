@@ -34,13 +34,6 @@ else
     COMPOSE_CMD="docker-compose"
 fi
 
-# Создание директорий для данных
-echo "Создание необходимых директорий..."
-mkdir -p data/mongodb
-mkdir -p data/elasticsearch
-mkdir -p data/postgres
-chmod 777 data/elasticsearch  # Elasticsearch требует такие права
-
 # Проверка .env файла
 if [ ! -f .env ]; then
     echo "Создание файла .env из шаблона..."
@@ -135,9 +128,6 @@ if $COMPOSE_CMD ps | grep -q "Up"; then
                 $COMPOSE_CMD down --volumes --remove-orphans --rmi all
             fi
             rm -f .built_images
-            rm -rf data/elasticsearch/*
-            rm -rf data/mongodb/*
-            rm -rf data/postgres/*
             ;;
         4)
             echo "Запуск поверх текущей системы..."
