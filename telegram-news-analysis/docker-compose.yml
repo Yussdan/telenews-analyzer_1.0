@@ -1,0 +1,158 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: telegram_postgres
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U telegram_news"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    environment:
+      POSTGRES_USER: telegram_news
+      POSTGRES_PASSWORD: telegram_password
+      POSTGRES_DB: telegram_news
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - telegram_news_network
+
+  mongodb:
+    image: mongo:5.0
+    container_name: telegram_mongodb
+    restart: always
+    healthcheck:
+      test: mongosh --eval 'db.runCommand("ping").ok || db.adminCommand("ping").ok' || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - telegram_news_network
+
+  elasticsearch:
+    image: elasticsearch:7.17.10
+    container_name: telegram-news-elasticsearch
+    restart: always
+    environment:
+      - "cluster.service.slow_task_logging_threshold=30s"
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+      - "xpack.security.enabled=false"
+      - "http.cors.enabled=true"
+      - "http.cors.allow-origin=*"
+      - "network.host=0.0.0.0"
+      - "ingest.geoip.downloader.enabled=false"
+      - "action.destructive_requires_name=false"
+      - "bootstrap.memory_lock=false"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+    cpus: 12
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD", "curl", "-s", "-f", "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=30s"]
+      interval: 30s
+      timeout: 30s
+      retries: 10
+      start_period: 180s  # Increased start period
+    mem_limit: 2g
+    networks:
+      - telegram_news_network
+
+
+  collector:
+    build:
+      context: ./src/collector
+    container_name: telegram-news-collector
+    restart: unless-stopped
+    depends_on:
+      mongodb: 
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - MONGODB_URI=mongodb://mongodb:27017
+      - TELEGRAM_SESSION_FILE=/app/sessions/telegram_news_session.session
+    volumes:
+      - telegram_sessions:/app/sessions
+    networks:
+      - telegram_news_network
+
+  processor:
+    build:
+      context: ./src/processor
+    container_name: telegram-news-processor
+    restart: unless-stopped
+    mem_limit: 3g
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.socket().connect(('elasticsearch', 9200))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    env_file: .env
+    networks:
+      - telegram_news_network
+
+  api:
+    build:
+      context: ./src/api
+    container_name: telegram-news-api
+    restart: unless-stopped
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5050:5050"
+    env_file: .env
+    networks:
+      - telegram_news_network
+
+  frontend:
+    build:
+      context: ./src/frontend
+    container_name: telegram-news-frontend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file: .env
+    networks:
+      - telegram_news_network
+
+networks:
+  telegram_news_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  postgres_data:
+  mongodb_data:
+  elasticsearch_data:
+  telegram_sessions:

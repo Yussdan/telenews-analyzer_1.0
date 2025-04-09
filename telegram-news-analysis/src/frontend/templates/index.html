@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block title %}Главная | Анализ новостей в Telegram{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <h1 class="card-title">Анализ новостей в Telegram-каналах</h1>
+                <p class="card-text">
+                    Добро пожаловать в систему анализа новостей из Telegram-каналов. 
+                    Здесь вы можете изучать актуальные новости, отслеживать тренды и анализировать данные из различных телеграм-каналов.
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-4 mb-4">
+        <div class="card h-100">
+            <div class="card-body">
+                <h5 class="card-title">Новости</h5>
+                <p class="card-text">Просмотр и поиск последних новостей из отслеживаемых телеграм-каналов.</p>
+                <a href="/news" class="btn btn-primary">Перейти к новостям</a>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-4 mb-4">
+        <div class="card h-100">
+            <div class="card-body">
+                <h5 class="card-title">Тренды</h5>
+                <p class="card-text">Аналитика трендов, популярных тем и сущностей в новостном потоке.</p>
+                <a href="/trends" class="btn btn-primary">Анализировать тренды</a>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-4 mb-4">
+        <div class="card h-100">
+            <div class="card-body">
+                <h5 class="card-title">Каналы</h5>
+                <p class="card-text">Информация об отслеживаемых каналах и их статистика.</p>
+                <a href="/channels" class="btn btn-primary">Смотреть каналы</a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

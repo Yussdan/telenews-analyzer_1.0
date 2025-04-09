@@ -1,0 +1,235 @@
+{% extends "base.html" %}
+
+{% block title %}Каналы | Анализ новостей в Telegram{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="row">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h2>Отслеживаемые каналы</h2>
+                    <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addChannelModal">
+                        <i class="fas fa-plus"></i> Добавить канал
+                    </button>
+                </div>
+                
+                <div class="card-body">
+                    <div id="channelsResults">
+                        <div class="d-flex justify-content-center">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">Загрузка...</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Модальное окно для добавления канала -->
+<div class="modal fade" id="addChannelModal" tabindex="-1" aria-labelledby="addChannelModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="addChannelModalLabel">Добавить канал</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <form id="addChannelForm">
+                    <div class="mb-3">
+                        <label for="channelName" class="form-label">Имя канала</label>
+                        <div class="input-group">
+                            <span class="input-group-text">@</span>
+                            <input type="text" class="form-control" id="channelName" required placeholder="Имя канала (без @)">
+                        </div>
+                        <small class="form-text text-muted">Введите имя канала без символа @</small>
+                    </div>
+                    <div class="mb-3">
+                        <label for="channelTitle" class="form-label">Название канала (опционально)</label>
+                        <input type="text" class="form-control" id="channelTitle" placeholder="Название для отображения">
+                        <small class="form-text text-muted">Если не указано, будет использоваться имя канала</small>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                <button type="button" class="btn btn-primary" id="saveChannelBtn">Сохранить</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Функция для загрузки каналов
+    function loadChannels() {
+        document.getElementById('channelsResults').innerHTML = `
+            <div class="d-flex justify-content-center">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">Загрузка...</span>
+                </div>
+            </div>`;
+        
+        fetch('/api/proxy/channels')
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Network response was not ok');
+                }
+                return response.json();
+            })
+            .then(data => {
+                const channels = data.channels;
+                
+                if (!channels || channels.length === 0) {
+                    document.getElementById('channelsResults').innerHTML = `
+                        <div class="alert alert-info">
+                            У вас нет отслеживаемых каналов. Добавьте первый канал, нажав кнопку "Добавить канал".
+                        </div>`;
+                    return;
+                }
+                
+                let channelsHtml = `
+                    <div class="table-responsive">
+                        <table class="table table-striped table-hover">
+                            <thead>
+                                <tr>
+                                    <th>Название</th>
+                                    <th>Идентификатор</th>
+                                    <th>Всего сообщений</th>
+                                    <th>За 24 часа</th>
+                                    <th>Дата добавления</th>
+                                    <th>Действия</th>
+                                </tr>
+                            </thead>
+                            <tbody>`;
+                
+                for (const channel of channels) {
+                    const joinedDate = new Date(channel.added_at || new Date()).toLocaleString('ru-RU');
+                    
+                    channelsHtml += `
+                        <tr>
+                            <td>${channel.channel_title || channel.channel_name}</td>
+                            <td>@${channel.channel_name}</td>
+                            <td>${channel.stats?.total_messages || 0}</td>
+                            <td>${channel.stats?.last_24h_messages || 0}</td>
+                            <td>${joinedDate}</td>
+                            <td>
+                                <button class="btn btn-sm btn-danger delete-channel" data-channel-id="${channel.id}">
+                                    <i class="fas fa-trash"></i>
+                                </button>
+                            </td>
+                        </tr>`;
+                }
+                
+                channelsHtml += `
+                            </tbody>
+                        </table>
+                    </div>`;
+                
+                document.getElementById('channelsResults').innerHTML = channelsHtml;
+                
+                // Добавляем обработчики событий для кнопок удаления
+                document.querySelectorAll('.delete-channel').forEach(button => {
+                    button.addEventListener('click', function() {
+                        const channelId = this.getAttribute('data-channel-id');
+                        deleteChannel(channelId);
+                    });
+                });
+            })
+            .catch(error => {
+                console.error('Error loading channels:', error);
+                document.getElementById('channelsResults').innerHTML = `
+                    <div class="alert alert-danger">
+                        Произошла ошибка при загрузке каналов. Пожалуйста, попробуйте позже.
+                    </div>`;
+            });
+    }
+    
+    // Функция для добавления канала
+    function addChannel(channelName, channelTitle) {
+        if (!channelName) {
+            alert('Пожалуйста, введите имя канала.');
+            return;
+        }
+        
+        // Убираем @ из имени канала, если есть
+        if (channelName.startsWith('@')) {
+            channelName = channelName.substring(1);
+        }
+        
+        // Если название не указано, используем имя канала
+        if (!channelTitle) {
+            channelTitle = channelName;
+        }
+        
+        fetch('/api/proxy/channels', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                channel_name: channelName,
+                channel_title: channelTitle
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                alert('Ошибка: ' + data.error);
+            } else {
+                // Закрываем модальное окно и обновляем список каналов
+                const modal = bootstrap.Modal.getInstance(document.getElementById('addChannelModal'));
+                modal.hide();
+                
+                // Очищаем форму
+                document.getElementById('channelName').value = '';
+                document.getElementById('channelTitle').value = '';
+                
+                loadChannels();
+            }
+        })
+        .catch(error => {
+            console.error('Error adding channel:', error);
+            alert('Произошла ошибка при добавлении канала.');
+        });
+    }
+    
+    // Функция для удаления канала
+    function deleteChannel(channelId) {
+        if (!confirm('Вы уверены, что хотите удалить этот канал?')) {
+            return;
+        }
+        
+        fetch(`/api/proxy/channels/${channelId}`, {
+            method: 'DELETE'
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                alert('Ошибка: ' + data.error);
+            } else {
+                loadChannels();
+            }
+        })
+        .catch(error => {
+            console.error('Error deleting channel:', error);
+            alert('Произошла ошибка при удалении канала.');
+        });
+    }
+    
+    // Обработчики событий
+    document.addEventListener('DOMContentLoaded', function() {
+        loadChannels();
+        
+        // Обработчик для кнопки сохранения канала
+        document.getElementById('saveChannelBtn').addEventListener('click', function() {
+            const channelName = document.getElementById('channelName').value.trim();
+            const channelTitle = document.getElementById('channelTitle').value.trim();
+            addChannel(channelName, channelTitle);
+        });
+    });
+</script>
+{% endblock %}

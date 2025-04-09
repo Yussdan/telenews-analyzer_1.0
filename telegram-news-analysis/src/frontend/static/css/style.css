@@ -1,0 +1,148 @@
+/* Основные стили приложения */
+body {
+    padding-top: 56px;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.content {
+    flex: 1;
+}
+
+.footer {
+    margin-top: auto;
+    padding: 20px 0;
+    background-color: #f8f9fa;
+}
+
+/* Стили новостной карточки */
+.card {
+    margin-bottom: 1rem;
+    transition: transform 0.2s;
+}
+
+.card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* Стили для трендов */
+.trend-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid #eee;
+}
+
+.trend-item:last-child {
+    border-bottom: none;
+}
+
+/* Стили для бейджей */
+.badge {
+    margin-right: 0.25rem;
+}
+
+/* Стиль для канальной информации */
+.channel-info {
+    display: flex;
+    align-items: center;
+}
+
+.channel-icon {
+    width: 24px;
+    height: 24px;
+    margin-right: 8px;
+    border-radius: 50%;
+    background-color: #e9ecef;
+}
+
+/* Стили для форм и кнопок */
+.form-control:focus {
+    border-color: #80bdff;
+    box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
+}
+
+.btn-outline-primary:hover {
+    background-color: #007bff;
+    color: white;
+}
+
+/* Адаптивные стили */
+@media (max-width: 768px) {
+    .container {
+        padding-left: 10px;
+        padding-right: 10px;
+    }
+    
+    h1, h2 {
+        font-size: 1.5rem;
+    }
+}
+
+/* Стили для темной темы */
+@media (prefers-color-scheme: dark) {
+    body.dark-theme {
+        background-color: #343a40;
+        color: #f8f9fa;
+    }
+    
+    body.dark-theme .card {
+        background-color: #454d55;
+        border-color: #212529;
+    }
+    
+    body.dark-theme .card-header,
+    body.dark-theme .card-footer {
+        background-color: #3a4047;
+        border-color: #212529;
+    }
+    
+    body.dark-theme .text-muted {
+        color: #adb5bd !important;
+    }
+}
+
+/* Анимации */
+.fade-in {
+    animation: fadeIn 0.5s ease-in-out;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+/* Стили для индикаторов загрузки */
+.spinner-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 2rem 0;
+}
+
+/* Стили для панели инструментов */
+.toolbar {
+    margin-bottom: 1rem;
+    padding: 0.5rem;
+    background-color: #f8f9fa;
+    border-radius: 0.25rem;
+}
+
+/* Стили для списков элементов */
+.list-item {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid rgba(0,0,0,0.1);
+}
+
+.list-item:last-child {
+    border-bottom: none;
+}
+
+/* Стили для сообщения без результатов */
+.no-results {
+    text-align: center;
+    padding: 2rem;
+    color: #6c757d;
+}

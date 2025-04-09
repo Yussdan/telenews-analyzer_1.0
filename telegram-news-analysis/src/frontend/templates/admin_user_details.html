@@ -1,0 +1,448 @@
+{% extends "base.html" %}
+
+{% block title %}Детали пользователя | Анализ новостей в Telegram{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="row">
+        <div class="col-md-12">
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="/admin">Панель администратора</a></li>
+                    <li class="breadcrumb-item active" aria-current="page">Детали пользователя</li>
+                </ol>
+            </nav>
+            
+            <div class="card">
+                <div class="card-header">
+                    <h2 id="userTitle">Загрузка данных пользователя...</h2>
+                </div>
+                
+                <div class="card-body">
+                    <div id="userDetails">
+                        <div class="d-flex justify-content-center">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">Загрузка...</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3>Каналы пользователя</h3>
+                </div>
+                
+                <div class="card-body">
+                    <div id="userChannels">
+                        <div class="d-flex justify-content-center">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">Загрузка...</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Модальное окно для редактирования пользователя -->
+<div class="modal fade" id="editUserModal" tabindex="-1" aria-labelledby="editUserModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="editUserModalLabel">Редактирование пользователя</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <form id="editUserForm">
+                    <div class="mb-3">
+                        <label for="editEmail" class="form-label">Email</label>
+                        <input type="email" class="form-control" id="editEmail">
+                    </div>
+                    <div class="mb-3 form-check">
+                        <input type="checkbox" class="form-check-input" id="editIsAdmin">
+                        <label class="form-check-label" for="editIsAdmin">Администратор</label>
+                    </div>
+                    <div class="mb-3 form-check">
+                        <input type="checkbox" class="form-check-input" id="editIsActive">
+                        <label class="form-check-label" for="editIsActive">Активен</label>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                <button type="button" class="btn btn-primary" id="saveUserBtn">Сохранить</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Получаем ID пользователя из URL
+    const userId = parseInt("{{ user_id }}");
+    let currentUser = null;
+    
+    // Функция для загрузки информации о пользователе
+    function loadUserDetails() {
+        document.getElementById('userDetails').innerHTML = `
+            <div class="d-flex justify-content-center">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">Загрузка...</span>
+                </div>
+            </div>`;
+        
+        document.getElementById('userChannels').innerHTML = `
+            <div class="d-flex justify-content-center">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">Загрузка...</span>
+                </div>
+            </div>`;
+        
+        // Проверяем, что ID пользователя валидный
+        if (!userId || isNaN(userId)) {
+            document.getElementById('userTitle').textContent = 'Ошибка: Некорректный ID пользователя';
+            document.getElementById('userDetails').innerHTML = `
+                <div class="alert alert-danger">
+                    Некорректный ID пользователя. Пожалуйста, вернитесь на страницу администрирования.
+                </div>`;
+            document.getElementById('userChannels').innerHTML = '';
+            return;
+        }
+        
+        // Добавляем временной штамп для предотвращения кэширования
+        const timestamp = new Date().getTime();
+        
+        fetch(`/api/proxy/admin/users/${userId}?_=${timestamp}`)
+            .then(response => {
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        throw new Error('Пользователь не найден');
+                    }
+                    throw new Error('Ошибка сервера');
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log('User data received:', data);
+                
+                if (!data.user) {
+                    throw new Error('Данные пользователя отсутствуют в ответе');
+                }
+                
+                currentUser = data.user;
+                
+                // Обновляем заголовок
+                document.getElementById('userTitle').textContent = `Пользователь: ${currentUser.username}`;
+                
+                // Формируем информацию о пользователе
+                let createdDate;
+                try {
+                    createdDate = new Date(currentUser.created_at).toLocaleString('ru-RU');
+                } catch (e) {
+                    console.error('Error formatting date:', e);
+                    createdDate = 'Неизвестно';
+                }
+                
+                let userHtml = `
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <dl class="row">
+                                <dt class="col-sm-4">ID:</dt>
+                                <dd class="col-sm-8">${currentUser.id}</dd>
+                                
+                                <dt class="col-sm-4">Имя пользователя:</dt>
+                                <dd class="col-sm-8">${currentUser.username}</dd>
+                                
+                                <dt class="col-sm-4">Email:</dt>
+                                <dd class="col-sm-8">${currentUser.email || '-'}</dd>
+                            </dl>
+                        </div>
+                        <div class="col-md-6">
+                            <dl class="row">
+                                <dt class="col-sm-4">Статус:</dt>
+                                <dd class="col-sm-8">
+                                    <span class="badge ${currentUser.is_active ? 'bg-success' : 'bg-danger'}">
+                                        ${currentUser.is_active ? 'Активен' : 'Заблокирован'}
+                                    </span>
+                                </dd>
+                                
+                                <dt class="col-sm-4">Администратор:</dt>
+                                <dd class="col-sm-8">
+                                    <span class="badge ${currentUser.is_admin ? 'bg-success' : 'bg-secondary'}">
+                                        ${currentUser.is_admin ? 'Да' : 'Нет'}
+                                    </span>
+                                </dd>
+                                
+                                <dt class="col-sm-4">Дата регистрации:</dt>
+                                <dd class="col-sm-8">${createdDate}</dd>
+                            </dl>
+                        </div>
+                    </div>
+                    <div class="d-flex justify-content-end">
+                        <button class="btn btn-primary me-2" id="editUserBtn">
+                            <i class="fas fa-edit"></i> Редактировать
+                        </button>
+                        ${currentUser.is_active ? 
+                            `<button class="btn btn-warning me-2" id="blockUserBtn">
+                                <i class="fas fa-ban"></i> Заблокировать
+                            </button>` : 
+                            `<button class="btn btn-success me-2" id="unblockUserBtn">
+                                <i class="fas fa-check"></i> Разблокировать
+                            </button>`
+                        }
+                        ${!currentUser.is_admin ? 
+                            `<button class="btn btn-danger" id="deleteUserBtn">
+                                <i class="fas fa-trash"></i> Удалить
+                            </button>` : ''
+                        }
+                    </div>`;
+                
+                document.getElementById('userDetails').innerHTML = userHtml;
+                
+                // Добавляем обработчики событий
+                if (document.getElementById('editUserBtn')) {
+                    document.getElementById('editUserBtn').addEventListener('click', showEditUserModal);
+                }
+                
+                if (document.getElementById('blockUserBtn')) {
+                    document.getElementById('blockUserBtn').addEventListener('click', function() {
+                        updateUserStatus(false);
+                    });
+                }
+                
+                if (document.getElementById('unblockUserBtn')) {
+                    document.getElementById('unblockUserBtn').addEventListener('click', function() {
+                        updateUserStatus(true);
+                    });
+                }
+                
+                if (document.getElementById('deleteUserBtn')) {
+                    document.getElementById('deleteUserBtn').addEventListener('click', deleteUser);
+                }
+                
+                // Отображаем каналы пользователя
+                if (currentUser.channels && Array.isArray(currentUser.channels)) {
+                    displayUserChannels(currentUser.channels);
+                } else {
+                    console.error('Channels data is not an array:', currentUser.channels);
+                    document.getElementById('userChannels').innerHTML = `
+                        <div class="alert alert-warning">
+                            Ошибка при загрузке каналов пользователя. Неверный формат данных.
+                        </div>`;
+                }
+            })
+            .catch(error => {
+                console.error('Error loading user details:', error);
+                document.getElementById('userTitle').textContent = 'Ошибка загрузки';
+                document.getElementById('userDetails').innerHTML = `
+                    <div class="alert alert-danger">
+                        Произошла ошибка при загрузке информации о пользователе: ${error.message}
+                    </div>`;
+                document.getElementById('userChannels').innerHTML = `
+                    <div class="alert alert-danger">
+                        Произошла ошибка при загрузке каналов пользователя.
+                    </div>`;
+            });
+    }
+    
+    // Функция для отображения каналов пользователя
+    function displayUserChannels(channels) {
+        if (!channels || channels.length === 0) {
+            document.getElementById('userChannels').innerHTML = `
+                <div class="alert alert-info">
+                    У пользователя нет отслеживаемых каналов.
+                </div>`;
+            return;
+        }
+        
+        let channelsHtml = `
+            <div class="table-responsive">
+                <table class="table table-striped table-hover">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Название</th>
+                            <th>Идентификатор</th>
+                            <th>Дата добавления</th>
+                            <th>Действия</th>
+                        </tr>
+                    </thead>
+                    <tbody>`;
+        
+        for (const channel of channels) {
+            let addedDate;
+            try {
+                addedDate = new Date(channel.added_at).toLocaleString('ru-RU');
+            } catch (e) {
+                console.error('Error formatting channel date:', e);
+                addedDate = 'Неизвестно';
+            }
+            
+            channelsHtml += `
+                <tr>
+                    <td>${channel.id}</td>
+                    <td>${channel.channel_title || channel.channel_name}</td>
+                    <td>@${channel.channel_name}</td>
+                    <td>${addedDate}</td>
+                    <td>
+                        <button class="btn btn-sm btn-danger delete-channel" data-channel-id="${channel.id}">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </td>
+                </tr>`;
+        }
+        
+        channelsHtml += `
+                    </tbody>
+                </table>
+            </div>`;
+        
+        document.getElementById('userChannels').innerHTML = channelsHtml;
+        
+        // Добавляем обработчики событий для кнопок удаления каналов
+        document.querySelectorAll('.delete-channel').forEach(button => {
+            button.addEventListener('click', function() {
+                const channelId = this.getAttribute('data-channel-id');
+                deleteChannel(channelId);
+            });
+        });
+    }
+    
+    // Функция для показа модального окна редактирования пользователя
+    function showEditUserModal() {
+        // Заполняем форму текущими данными пользователя
+        document.getElementById('editEmail').value = currentUser.email || '';
+        document.getElementById('editIsAdmin').checked = currentUser.is_admin;
+        document.getElementById('editIsActive').checked = currentUser.is_active;
+        
+        // Показываем модальное окно
+        const modal = new bootstrap.Modal(document.getElementById('editUserModal'));
+        modal.show();
+    }
+    
+    // Функция для сохранения изменений пользователя
+    function saveUserChanges() {
+        const updatedData = {
+            email: document.getElementById('editEmail').value.trim(),
+            is_admin: document.getElementById('editIsAdmin').checked,
+            is_active: document.getElementById('editIsActive').checked
+        };
+        
+        fetch(`/api/proxy/admin/users/${userId}`, {
+            method: 'PATCH',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(updatedData)
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                alert('Ошибка: ' + data.error);
+            } else {
+                // Закрываем модальное окно
+                const modal = bootstrap.Modal.getInstance(document.getElementById('editUserModal'));
+                modal.hide();
+                
+                // Обновляем информацию о пользователе
+                loadUserDetails();
+            }
+        })
+        .catch(error => {
+            console.error('Error updating user:', error);
+            alert('Произошла ошибка при обновлении пользователя.');
+        });
+    }
+    
+    // Функция для изменения статуса пользователя (блокировка/разблокировка)
+    function updateUserStatus(isActive) {
+        const action = isActive ? 'разблокировать' : 'заблокировать';
+        if (!confirm(`Вы уверены, что хотите ${action} этого пользователя?`)) {
+            return;
+        }
+        
+        fetch(`/api/proxy/admin/users/${userId}`, {
+            method: 'PATCH',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                is_active: isActive
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                alert('Ошибка: ' + data.error);
+            } else {
+                loadUserDetails();
+            }
+        })
+        .catch(error => {
+            console.error(`Error updating user status:`, error);
+            alert(`Произошла ошибка при изменении статуса пользователя.`);
+        });
+    }
+    
+    // Функция для удаления пользователя
+    function deleteUser() {
+        if (!confirm('Вы уверены, что хотите удалить этого пользователя? Это действие нельзя отменить!')) {
+            return;
+        }
+        
+        fetch(`/api/proxy/admin/users/${userId}`, {
+            method: 'DELETE'
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                alert('Ошибка: ' + data.error);
+            } else {
+                // Перенаправляем на страницу администрирования после успешного удаления
+                window.location.href = '/admin';
+            }
+        })
+        .catch(error => {
+            console.error('Error deleting user:', error);
+            alert('Произошла ошибка при удалении пользователя.');
+        });
+    }
+    
+    // Функция для удаления канала пользователя
+    function deleteChannel(channelId) {
+        if (!confirm('Вы уверены, что хотите удалить этот канал у пользователя?')) {
+            return;
+        }
+        
+        fetch(`/api/proxy/channels/${channelId}`, {
+            method: 'DELETE'
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                alert('Ошибка: ' + data.error);
+            } else {
+                loadUserDetails();
+            }
+        })
+        .catch(error => {
+            console.error('Error deleting channel:', error);
+            alert('Произошла ошибка при удалении канала.');
+        });
+    }
+    
+    // Обработчики событий
+    document.addEventListener('DOMContentLoaded', function() {
+        console.log('Loading user details for user ID:', userId);
+        loadUserDetails();
+        
+        // Обработчик для кнопки сохранения пользователя
+        document.getElementById('saveUserBtn').addEventListener('click', saveUserChanges);
+    });
+</script>
+{% endblock %}
