@@ -1,41 +1,38 @@
 {% extends "base.html" %}
-
-{% block title %}Новости | Анализ новостей в Telegram{% endblock %}
+{% block title %}Новости | Анализ Telegram{% endblock %}
 
 {% block content %}
-<div class="row mb-4">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-body">
-                <h2 class="card-title">Новости из Telegram-каналов</h2>
-                
-                <div class="mb-4">
-                    <form id="searchForm" class="row g-3">
-                        <div class="col-md-8">
-                            <input type="text" class="form-control" id="searchQuery" placeholder="Поиск по новостям...">
-                        </div>
-                        <div class="col-md-2">
-                            <select class="form-select" id="channelSelect">
-                                <option value="">Все каналы</option>
-                            </select>
-                        </div>
-                        <div class="col-md-2">
-                            <button type="submit" class="btn btn-primary w-100">Поиск</button>
-                        </div>
-                    </form>
+<div class="container py-4">
+    <div class="card shadow-sm rounded-4">
+        <div class="card-body">
+            <h2 class="card-title mb-4">Новости из Telegram-каналов</h2>
+            
+            <form id="searchForm" class="row gy-2 gx-3 align-items-center mb-4">
+                <div class="col-md-6">
+                    <input type="text" class="form-control" id="searchQuery" placeholder="Введите запрос...">
                 </div>
-                
-                <div id="newsResults">
-                    <div class="d-flex justify-content-center">
-                        <div class="spinner-border" role="status">
-                            <span class="visually-hidden">Загрузка...</span>
-                        </div>
+                <div class="col-md-3">
+                    <select class="form-select" id="channelSelect">
+                        <option value="">Все каналы</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <button type="submit" class="btn btn-primary w-100">Найти</button>
+                </div>
+            </form>
+
+            <div id="resultsInfo" class="mb-3 text-muted small"></div>
+
+            <div id="newsResults">
+                <div class="text-center py-5">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Загрузка...</span>
                     </div>
                 </div>
-                
-                <div class="mt-3 text-center">
-                    <button id="loadMore" class="btn btn-outline-primary" style="display: none;">Загрузить еще</button>
-                </div>
+            </div>
+
+            <div class="text-center mt-4">
+                <button id="loadMore" class="btn btn-outline-primary" style="display: none;">Загрузить еще</button>
             </div>
         </div>
     </div>
@@ -43,190 +40,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
-    let currentPage = 1;
-    let currentLimit = 10;
-    let totalResults = 0;
-    let currentQuery = '';
-    let currentChannel = '';
-    
-    // Функция для загрузки новостей
-    function loadNews(page = 1, isNewSearch = false) {
-        const query = document.getElementById('searchQuery').value.trim();
-        const channel = document.getElementById('channelSelect').value;
-        
-        let apiUrl = '';
-        let params = new URLSearchParams();
-        
-        params.append('limit', currentLimit);
-        params.append('skip', (page - 1) * currentLimit);
-        
-        if (channel) {
-            params.append('channel', channel);
-            currentChannel = channel;
-        } else {
-            currentChannel = '';
-        }
-        
-        if (query) {
-            apiUrl = '/api/proxy/news/search';
-            params.append('q', query);
-            currentQuery = query;
-        } else {
-            apiUrl = '/api/proxy/news/latest';
-            currentQuery = '';
-        }
-        
-        document.getElementById('loadMore').style.display = 'none';
-        
-        if (isNewSearch) {
-            document.getElementById('newsResults').innerHTML = `
-                <div class="d-flex justify-content-center">
-                    <div class="spinner-border" role="status">
-                        <span class="visually-hidden">Загрузка...</span>
-                    </div>
-                </div>`;
-        } else {
-            document.getElementById('loadMore').innerHTML = `
-                <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                Загрузка...`;
-        }
-        
-        fetch(`${apiUrl}?${params.toString()}`)
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error('Network response was not ok');
-                }
-                return response.json();
-            })
-            .then(data => {
-                const newsItems = data.news;
-                totalResults = data.total;
-                
-                let newsHtml = '';
-                
-                if (isNewSearch) {
-                    newsHtml = `
-                        <p class="text-muted">Найдено результатов: ${totalResults}</p>
-                        <hr>`;
-                }
-                
-                if (newsItems.length === 0 && isNewSearch) {
-                    newsHtml += '<div class="alert alert-info">Новости не найдены</div>';
-                } else {
-                    for (const item of newsItems) {
-                        const date = new Date(item.date);
-                        const formattedDate = date.toLocaleString('ru-RU');
-                        
-                        let sentimentBadge = '';
-                        if (item.sentiment) {
-                            let badgeClass = '';
-                            let sentimentText = '';
-                            
-                            switch(item.sentiment.label) {
-                                case 'positive':
-                                    badgeClass = 'bg-success';
-                                    sentimentText = 'Позитивно';
-                                    break;
-                                case 'negative':
-                                    badgeClass = 'bg-danger';
-                                    sentimentText = 'Негативно';
-                                    break;
-                                default:
-                                    badgeClass = 'bg-secondary';
-                                    sentimentText = 'Нейтрально';
-                            }
-                            
-                            sentimentBadge = `<span class="badge ${badgeClass}">${sentimentText}</span>`;
-                        }
-                        
-                        let topicsTags = '';
-                        if (item.topics && item.topics.length > 0) {
-                            topicsTags = item.topics.map(topic => 
-                                `<span class="badge bg-info me-1">${topic}</span>`
-                            ).join('');
-                        }
-                        
-                        newsHtml += `
-                            <div class="card mb-3">
-                                <div class="card-body">
-                                    <div class="d-flex justify-content-between align-items-center mb-2">
-                                        <h5 class="card-title">От: ${item.channel_name}</h5>
-                                        <small class="text-muted">${formattedDate}</small>
-                                    </div>
-                                    <p class="card-text">${item.text}</p>
-                                    <div class="d-flex justify-content-between align-items-center">
-                                        <div>
-                                            ${sentimentBadge}
-                                            ${topicsTags}
-                                        </div>
-                                        <div class="text-muted">
-                                            <small>Просмотры: ${item.views || 'N/A'}</small>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>`;
-                    }
-                }
-                
-                if (isNewSearch) {
-                    document.getElementById('newsResults').innerHTML = newsHtml;
-                } else {
-                    document.getElementById('newsResults').innerHTML += newsHtml;
-                }
-                
-                currentPage = page;
-                
-                // Показываем кнопку "Загрузить еще", если есть еще результаты
-                if (currentPage * currentLimit < totalResults) {
-                    document.getElementById('loadMore').style.display = 'inline-block';
-                    document.getElementById('loadMore').innerHTML = 'Загрузить еще';
-                } else {
-                    document.getElementById('loadMore').style.display = 'none';
-                }
-            })
-            .catch(error => {
-                console.error('Error loading news:', error);
-                document.getElementById('newsResults').innerHTML = `
-                    <div class="alert alert-danger">
-                        Произошла ошибка при загрузке новостей. Пожалуйста, попробуйте позже.
-                    </div>`;
-                document.getElementById('loadMore').style.display = 'none';
-            });
-    }
-    
-    // Загрузка списка каналов
-    function loadChannels() {
-        fetch('/api/proxy/channels')
-            .then(response => response.json())
-            .then(data => {
-                const selectElement = document.getElementById('channelSelect');
-                
-                for (const channel of data.channels) {
-                    const option = document.createElement('option');
-                    option.value = channel.channel_name;
-                    option.textContent = channel.title || channel.channel_name;
-                    selectElement.appendChild(option);
-                }
-            })
-            .catch(error => {
-                console.error('Error loading channels:', error);
-            });
-    }
-    
-    // Обработчики событий
-    document.addEventListener('DOMContentLoaded', function() {
-        loadNews(1, true);
-        loadChannels();
-        
-        document.getElementById('searchForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            loadNews(1, true);
-        });
-        
-        document.getElementById('loadMore').addEventListener('click', function() {
-            loadNews(currentPage + 1, false);
-        });
-    });
-</script>
+<script src="{{ url_for('static', filename='js/news.js') }}"></script>
 {% endblock %}

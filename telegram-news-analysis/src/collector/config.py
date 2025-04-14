@@ -14,3 +14,7 @@ CHANNELS_COLLECTION = "channels"
 
 # Logging settings
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# Kafka settings
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "telegran_news")
+KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")

@@ -1,69 +1,94 @@
-import os
-import time
-import logging
-import sys
-from datetime import datetime
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import (
+    udf, col, current_timestamp, from_json, length, avg, count, 
+    collect_set, window, collect_list
+)
+from pyspark.sql.types import (
+    ArrayType, StructType, StructField, StringType, FloatType, 
+    TimestampType, IntegerType
+)
 import spacy
-import pymongo
+import logging
+import json
+import os
+from pymongo import MongoClient
 
-from db_connection import connect_to_elasticsearch, connect_to_mongodb
-from topic_modeling import TopicModeler
 from sentiment_analysis import SentimentAnalyzer
+from topic_modeling import TopicModeler
+from db_connection import connect_to_elasticsearch
 
-# MongoDB settings
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://mongodb:27017")
-#MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-MONGODB_DB = os.getenv("MONGODB_DB", "telegram_news")
-MESSAGES_COLLECTION = "messages"
+# Configure logging
+logging.basicConfig(level=logging.INFO, 
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# Elasticsearch settings
+# Environment variables
 ELASTICSEARCH_HOST = os.getenv("ELASTICSEARCH_HOST", "elasticsearch")
-# ELASTICSEARCH_HOST = os.getenv("ELASTICSEARCH_HOST", "localhost")
 ELASTICSEARCH_PORT = os.getenv("ELASTICSEARCH_PORT", "9200")
-ELASTICSEARCH_INDEX = "telegram_news"
+ELASTICSEARCH_NEWS_INDEX = os.getenv("ELASTICSEARCH_NEWS_INDEX", "telegram_news")
+ELASTICSEARCH_METRICS_INDEX = os.getenv("ELASTICSEARCH_METRICS_INDEX", "telegram_metrics")
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://mongodb:27017")
+MONGODB_DB = os.getenv("MONGODB_DB", "telegram_news")
+KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "kafka:9092")
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "telegram_news")
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "20"))
 RETRY_DELAY = int(os.getenv("RETRY_DELAY", "30"))
 CONNECTION_TIMEOUT = int(os.getenv("CONNECTION_TIMEOUT", "60"))
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger(__name__)
+# Определение схемы сообщения для парсинга JSON из Kafka
+message_schema = StructType([
+    StructField("id", StringType()),
+    StructField("text", StringType()),
+    StructField("channel_name", StringType()),
+    StructField("date", TimestampType()),
+    StructField("views", IntegerType()),
+    StructField("forwards", IntegerType()),
+    StructField("has_media", StringType())
+])
+
+# Определение схем для UDF
+sentiment_schema = StructType([
+    StructField("label", StringType()),
+    StructField("score", FloatType())
+])
 
 class NewsProcessor:
     def __init__(self):
-        # Подключение к MongoDB с улучшенной логикой повторных попыток
-        self.mongo_client, self.db = connect_to_mongodb(MONGODB_URI, MONGODB_DB)
-        self.messages_collection = self.db[MESSAGES_COLLECTION]
-        
-        # Подключение к Elasticsearch с улучшенной логикой повторных попыток
-        self.es = connect_to_elasticsearch(
-            ELASTICSEARCH_HOST, 
-            ELASTICSEARCH_PORT,
-            max_retries=MAX_RETRIES,
-            retry_delay=RETRY_DELAY,
-            timeout=CONNECTION_TIMEOUT
-        )
-        
-        # Создание индекса Elasticsearch, если не существует
-        self._setup_elasticsearch_index()
-        
-        logger.info("Loading NLP models...")
-        self.nlp = spacy.load("ru_core_news_md", disable=["parser", "ner"])
-        self.topic_modeler = TopicModeler(self.nlp)
-        self.sentiment_analyzer = SentimentAnalyzer()
-        logger.info("NLP models loaded")
-
-    def _setup_elasticsearch_index(self):
-        """Create Elasticsearch index if it doesn't exist"""
+        logger.info("Initializing News Processor")
         try:
-            if not self.es.indices.exists(index=ELASTICSEARCH_INDEX):
+            self.nlp = spacy.load("ru_core_news_sm")
+            self.sentiment_analyzer = SentimentAnalyzer()
+            self.topic_modeler = TopicModeler(self.nlp)
+            logger.info("NLP components initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing NLP components: {e}")
+            raise
+            
+        # Connect to Elasticsearch
+        try:
+            self.es = connect_to_elasticsearch(
+                ELASTICSEARCH_HOST, 
+                ELASTICSEARCH_PORT,
+                max_retries=MAX_RETRIES,
+                retry_delay=RETRY_DELAY,
+                timeout=CONNECTION_TIMEOUT
+            )
+            logger.info("Connected to Elasticsearch successfully")
+        except Exception as e:
+            logger.error(f"Failed to connect to Elasticsearch: {e}")
+            raise
+            
+        # Setup Elasticsearch indices
+        self._setup_elasticsearch_indices()
+
+    def _setup_elasticsearch_indices(self):
+        """Create Elasticsearch indices if they don't exist"""
+        try:
+            # News index
+            if not self.es.indices.exists(index=ELASTICSEARCH_NEWS_INDEX):
                 # Your existing index creation code
                 self.es.indices.create(
-                    index=ELASTICSEARCH_INDEX,
+                    index=ELASTICSEARCH_NEWS_INDEX,
                     body={
                         "settings": {
                             "number_of_shards": 1,
@@ -126,155 +151,279 @@ class NewsProcessor:
                         }
                     }
                 )
-
-                logger.info(f"Created Elasticsearch index: {ELASTICSEARCH_INDEX}")
+                logger.info(f"Created Elasticsearch index: {ELASTICSEARCH_NEWS_INDEX}")
+                
+            # Metrics index
+            if not self.es.indices.exists(index=ELASTICSEARCH_METRICS_INDEX):
+                self.es.indices.create(
+                    index=ELASTICSEARCH_METRICS_INDEX,
+                    body={
+                        "settings": {
+                            "number_of_shards": 1,
+                            "number_of_replicas": 0
+                        },
+                        "mappings": {
+                            "properties": {
+                                "channel_name": {"type": "keyword"},
+                                "window_start": {"type": "date"},
+                                "window_end": {"type": "date"},
+                                "hourly_sentiment": {"type": "float"},
+                                "message_count": {"type": "integer"},
+                                "hourly_topics": {"type": "keyword"}
+                            }
+                        }
+                    }
+                )
+                logger.info(f"Created Elasticsearch index: {ELASTICSEARCH_METRICS_INDEX}")
+                
         except Exception as e:
-            logger.error(f"Failed to create Elasticsearch index: {e}")
+            logger.error(f"Failed to create Elasticsearch indices: {e}")
             raise
         
-    def process_messages(self, batch_size=30):
-        """Обработка непроанализированных сообщений из MongoDB"""
-        # Получение необработанных сообщений
-        unprocessed_messages = self.messages_collection.find(
-            {"processed": False}
-        ).sort("date", pymongo.ASCENDING).limit(batch_size)
+    def create_udfs(self):
+        """Создание UDF функций для Spark"""
+        logger.info("Creating UDFs for sentiment analysis and topic extraction")
         
-        count = 0
-        for message in unprocessed_messages:
+        @udf(sentiment_schema)
+        def analyze_sentiment(text):
             try:
-                # Обработка текста сообщения
-                text = message.get("text", "")
-                if not text or len(text) < 10:  # Игнорирование слишком коротких сообщений
-                    self.messages_collection.update_one(
-                        {"_id": message["_id"]},
-                        {"$set": {"processed": True, "skipped": True}}
-                    )
-                    continue
-                
-                # Анализ текста с помощью spaCy
-                doc = self.nlp(text)
-                
-                # Выделение именованных сущностей
-                entities = []
-                for ent in doc.ents:
-                    entities.append({
-                        "entity": ent.text,
-                        "type": ent.label_
-                    })
-                
-                # Определение тональности текста
-                sentiment = self.sentiment_analyzer.analyze(text)
-                
-                # Определение тем
-                topics = self.topic_modeler.get_topics(text)
-                
-                # Создание индексируемого документа
-                doc_id = f"{message['channel_id']}_{message['message_id']}"
-                es_doc = {
-                    "message_id": message["message_id"],
-                    "channel_id": message["channel_id"],
-                    "channel_name": message.get("channel_name", ""),
-                    "date": message["date"],
-                    "text": text,
-                    "entities": entities,
-                    "sentiment": sentiment,
-                    "topics": topics,
-                    "has_media": message.get("has_media", False),
-                    "views": message.get("views", 0),
-                    "forwards": message.get("forwards", 0)
-                }
-                
-                # Try to index with retries
-                max_es_retries = 5
-                for retry in range(max_es_retries):
-                    try:
-                        # Индексация в Elasticsearch
-                        self.es.index(
-                            index=ELASTICSEARCH_INDEX,
-                            id=doc_id,
-                            body=es_doc,
-                            request_timeout=30  # Add explicit timeout
-                        )
-                        break  # Success - exit retry loop
-                    except Exception as es_error:
-                        if retry < max_es_retries - 1:
-                            logger.warning(f"Elasticsearch indexing failed (attempt {retry+1}/{max_es_retries}): {es_error}")
-                            time.sleep(2)  # Short delay before retry
-                        else:
-                            # Final retry failed
-                            logger.error(f"Failed to index document {doc_id} after {max_es_retries} attempts")
-                            raise  # Re-raise to be caught by outer exception handler
-                
-                # Обновление статуса в MongoDB
-                self.messages_collection.update_one(
-                    {"_id": message["_id"]},
-                    {"$set": {
-                        "processed": True,
-                        "entities": entities,
-                        "sentiment": sentiment,
-                        "topics": topics,
-                        "processed_at": datetime.now()
-                    }}
-                )
-                
-                count += 1
-                if count % 10 == 0:
-                    logger.info(f"Processed {count} messages")
-                
+                if text:
+                    analyzer = SentimentAnalyzer()
+                    result = analyzer.analyze(text)
+                    return (result["label"], float(result["score"]))
+                return ("neutral", 0.5)
             except Exception as e:
-                logger.error(f"Error processing message {message.get('_id')}: {e}")
-                # Mark as error but don't set as processed so we can try again later
-                try:
-                    self.messages_collection.update_one(
-                        {"_id": message["_id"]},
-                        {"$set": {"error": str(e), "error_time": datetime.now()}}
-                    )
-                except Exception as update_error:
-                    logger.error(f"Failed to update error status: {update_error}")
-        
-        return count
+                logger.error(f"Error in sentiment analysis: {e}")
+                return ("error", 0.0)
 
-    
-    def run(self, interval=30):
-        """Запуск циклической обработки сообщений"""
-        logger.info("Starting News Processor")
+        @udf(ArrayType(StringType()))
+        def extract_topics(text):
+            try:
+                if text:
+                    nlp = spacy.load("ru_core_news_sm")
+                    modeler = TopicModeler(nlp)
+                    return modeler.get_topics(text)
+                return []
+            except Exception as e:
+                logger.error(f"Error in topic extraction: {e}")
+                return []
+
+        return analyze_sentiment, extract_topics
+
+
+def create_spark_session():
+    """Создание сессии Spark"""
+    logger.info("Creating Spark session")
+    return SparkSession.builder \
+        .appName("NewsFeedProcessor") \
+        .config("spark.jars.packages", 
+                "org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.0," +
+                "org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0")\
+        .config("spark.driver.memory", "4g") \
+        .config("spark.executor.memory", "8g") \
+        .getOrCreate()
+
+def read_from_kafka(spark):
+    """Чтение данных из Kafka"""
+    logger.info(f"Setting up Kafka stream reader for topic: {KAFKA_TOPIC}")
+    return spark.readStream \
+        .format("kafka") \
+        .option("kafka.bootstrap.servers", KAFKA_BROKERS) \
+        .option("subscribe", KAFKA_TOPIC) \
+        .option("startingOffsets", "latest") \
+        .load()
+
+def write_to_elasticsearch_custom(df, index_name, id_field=None):
+    """Запись данных в Elasticsearch через foreachBatch"""
+    logger.info(f"Setting up Elasticsearch stream writer for index: {index_name}")
+
+    def process_batch(batch_df, batch_id):
         try:
-            while True:
-                start_time = time.time()
-                processed_count = self.process_messages()
-                
-                if processed_count > 0:
-                    logger.info(f"Processed {processed_count} messages")
-                else:
-                    logger.info("No new messages to process")
-                
-                # Обновление модели тем каждый час
-                if datetime.now().minute == 0:
-                    logger.info("Updating topic model...")
-                    self.topic_modeler.update_model(self.messages_collection)
-                
-                elapsed = time.time() - start_time
-                sleep_time = max(0, interval - elapsed)
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                
-        except KeyboardInterrupt:
-            logger.info("Process interrupted by user")
-        except Exception as e:
-            logger.error(f"Error in processor: {e}")
-        finally:
-            self.mongo_client.close()
-            logger.info("News Processor stopped")
+            if not batch_df.isEmpty():
+                options = {
+                    "es.resource": index_name,
+                    "es.nodes": ELASTICSEARCH_HOST,
+                    "es.port": ELASTICSEARCH_PORT,
+                    "es.nodes.wan.only": "true"
+                }
+                if id_field:
+                    options["es.mapping.id"] = id_field
 
+                batch_df.write \
+                    .format("org.elasticsearch.spark.sql") \
+                    .options(**options) \
+                    .mode("append") \
+                    .save()
+                
+                logger.info(f"Wrote batch {batch_id} to Elasticsearch index {index_name}")
+        except Exception as e:
+            logger.error(f"Error writing to Elasticsearch: {e}")
+
+    return df.writeStream \
+        .foreachBatch(process_batch) \
+        .option("checkpointLocation", f"/tmp/checkpoint/es_{index_name.replace('/', '_')}") \
+        .start()
+
+def write_to_mongodb_custom(df, collection_name):
+    """Альтернативная запись в MongoDB через foreachBatch"""
+    logger.info(f"Setting up MongoDB stream writer for collection: {collection_name}")
+    
+    def process_batch(batch_df, batch_id):
+        try:
+            if not batch_df.isEmpty():
+                # Convert batch to list of dicts
+                rows = batch_df.toJSON().collect()
+                documents = [json.loads(row) for row in rows]
+                
+                # Write to MongoDB
+                client = MongoClient(MONGODB_URI)
+                db = client[MONGODB_DB]
+                collection = db[collection_name]
+                
+                if documents:
+                    # For upsert, we need to identify documents properly
+                    for doc in documents:
+                        # For hourly metrics, use combined key of channel name and window start/end
+                        if "window" in doc and "channel_name" in doc:
+                            filter_criteria = {
+                                "channel_name": doc["channel_name"],
+                                "window.start": doc["window"]["start"],
+                                "window.end": doc["window"]["end"]
+                            }
+                            collection.update_one(filter_criteria, {"$set": doc}, upsert=True)
+                        else:
+                            # For regular docs, use id if available
+                            if "id" in doc:
+                                collection.update_one({"id": doc["id"]}, {"$set": doc}, upsert=True)
+                            else:
+                                collection.insert_one(doc)
+                    
+                    logger.info(f"Processed {len(documents)} documents for MongoDB collection {collection_name}")
+        except Exception as e:
+            logger.error(f"Error writing to MongoDB: {e}")
+    
+    return df.writeStream \
+        .foreachBatch(process_batch) \
+        .option("checkpointLocation", f"/tmp/checkpoint/mongo_{collection_name}") \
+        .start()
+
+def process_data(df, news_processor):
+    """Расширенная обработка данных"""
+    logger.info("Processing incoming data stream")
+    
+    # Создание UDF
+    analyze_sentiment, extract_topics = news_processor.create_udfs()
+    
+    # Обработка данных
+    processed_df = df.select(
+        col("key").cast("string"),
+        from_json(col("value").cast("string"), message_schema).alias("data")
+    ).select("data.*")
+
+    # Добавление анализа тональности и тем
+    enriched_df = processed_df \
+        .withColumn("sentiment", analyze_sentiment(col("text"))) \
+        .withColumn("topics", extract_topics(col("text"))) \
+        .withColumn("processing_time", current_timestamp()) \
+        .withColumn("text_length", length(col("text"))) \
+        .withColumn("has_media_int", col("has_media").cast("integer"))
+
+    return enriched_df
+
+def calculate_channel_metrics(df):
+    """Расчет метрик по каналам"""
+    logger.info("Calculating channel metrics")
+    return df \
+        .groupBy("channel_name") \
+        .agg(
+            avg("sentiment.score").alias("avg_sentiment"),
+            count("*").alias("message_count"),
+            avg("views").alias("avg_views"),
+            avg("forwards").alias("avg_forwards"),
+            collect_set("topics").alias("channel_topics")
+        )
 
 def main():
-    logger.info("Starting main execution")
+    # Инициализация
+    logger.info("Starting News Processor")
+    spark = create_spark_session()
+    news_processor = NewsProcessor()
+    
     try:
-        processor = NewsProcessor()
-        processor.run()
+        # Чтение из Kafka
+        kafka_df = read_from_kafka(spark)
+        
+        # Основная обработка
+        processed_df = process_data(kafka_df, news_processor)
+        
+        # Запись обработанных данных в Elasticsearch
+        news_query = write_to_elasticsearch_custom(
+            processed_df, 
+            ELASTICSEARCH_NEWS_INDEX, 
+            id_field="id"
+        )
+        
+        # Создание временных окон для анализа
+        windowed_df = processed_df \
+            .withWatermark("date", "1 hour") \
+            .groupBy(
+                window(col("date"), "1 hour"),
+                col("channel_name")
+            )
+        
+        # Агрегации по временным окнам
+        hourly_metrics = windowed_df.agg(
+            avg("sentiment.score").alias("hourly_sentiment"),
+            count("*").alias("message_count"),
+            collect_list("topics").alias("hourly_topics")
+        )
+        
+        # Преобразование window структуры для Elasticsearch
+        hourly_metrics_flat = hourly_metrics \
+            .withColumn("window_start", col("window.start")) \
+            .withColumn("window_end", col("window.end")) \
+            .drop("window")
+        
+        # Запись метрик в Elasticsearch
+        metrics_query = write_to_elasticsearch_custom(
+            hourly_metrics_flat, 
+            ELASTICSEARCH_METRICS_INDEX
+        )
+        
+        # Запись метрик в MongoDB
+        mongodb_query = write_to_mongodb_custom(hourly_metrics, "hourly_analytics")
+        
+        # Обновление модели тем периодически
+        def update_topic_model(batch_df, batch_id):
+            try:
+                if batch_id % 100 == 0 and not batch_df.isEmpty():  # Обновление каждые 100 батчей
+                    sample_size = 1000
+                    sampled_data = batch_df.limit(sample_size)
+                    text_samples = [row.text for row in sampled_data.select("text").collect() if row.text]
+                    if text_samples:
+                        news_processor.topic_modeler.update_model(text_samples)
+                        logger.info(f"Updated topic model with {len(text_samples)} samples")
+            except Exception as e:
+                logger.error(f"Error updating topic model: {e}")
+        
+        # Потоковая обработка с обновлением модели
+        update_query = processed_df.writeStream \
+            .foreachBatch(update_topic_model) \
+            .option("checkpointLocation", "/tmp/checkpoint/model_updates") \
+            .start()
+        
+        # Ожидание завершения
+        logger.info("All streaming queries started, waiting for termination")
+        news_query.awaitTermination()
+        metrics_query.awaitTermination()
+        mongodb_query.awaitTermination()
+        update_query.awaitTermination()
+        
     except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
-        raise
+        logger.error(f"Error in main processing: {e}")
+    finally:
+        logger.info("Stopping Spark session")
+        spark.stop()
 
 if __name__ == "__main__":
     main()
