@@ -63,12 +63,9 @@ class NewsProcessor:
         except Exception as e:
             logger.error(f"Error initializing NLP components: {e}")
             raise
-            
-        # Connect to Elasticsearch
         try:
             self.es = connect_to_elasticsearch(
-                ELASTICSEARCH_HOST, 
-                ELASTICSEARCH_PORT,
+                ELASTICSEARCH_HOST, ELASTICSEARCH_PORT,
                 max_retries=MAX_RETRIES,
                 retry_delay=RETRY_DELAY,
                 timeout=CONNECTION_TIMEOUT
@@ -77,16 +74,14 @@ class NewsProcessor:
         except Exception as e:
             logger.error(f"Failed to connect to Elasticsearch: {e}")
             raise
-            
-        # Setup Elasticsearch indices
+
         self._setup_elasticsearch_indices()
+
 
     def _setup_elasticsearch_indices(self):
         """Create Elasticsearch indices if they don't exist"""
         try:
-            # News index
             if not self.es.indices.exists(index=ELASTICSEARCH_NEWS_INDEX):
-                # Your existing index creation code
                 self.es.indices.create(
                     index=ELASTICSEARCH_NEWS_INDEX,
                     body={
@@ -152,8 +147,7 @@ class NewsProcessor:
                     }
                 )
                 logger.info(f"Created Elasticsearch index: {ELASTICSEARCH_NEWS_INDEX}")
-                
-            # Metrics index
+
             if not self.es.indices.exists(index=ELASTICSEARCH_METRICS_INDEX):
                 self.es.indices.create(
                     index=ELASTICSEARCH_METRICS_INDEX,
@@ -184,11 +178,12 @@ class NewsProcessor:
         """Создание UDF функций для Spark"""
         logger.info("Creating UDFs for sentiment analysis and topic extraction")
         
+        analyzer = self.sentiment_analyzer
+        modeler = self.topic_modeler
         @udf(sentiment_schema)
         def analyze_sentiment(text):
             try:
                 if text:
-                    analyzer = SentimentAnalyzer()
                     result = analyzer.analyze(text)
                     return (result["label"], float(result["score"]))
                 return ("neutral", 0.5)
@@ -200,31 +195,27 @@ class NewsProcessor:
         def extract_topics(text):
             try:
                 if text:
-                    nlp = spacy.load("ru_core_news_sm")
-                    modeler = TopicModeler(nlp)
                     return modeler.get_topics(text)
                 return []
             except Exception as e:
                 logger.error(f"Error in topic extraction: {e}")
                 return []
 
-        return analyze_sentiment, extract_topics
+        @udf(StringType())
+        def extract_main_entity(text):
+            try:
+                if text:
+                    entity = modeler.extract_main_entity(text)
+                    return str(entity) if entity else None
+                return None
+            except Exception as e:
+                logger.error(f"Error in entity extraction: {e}")
+                return None
 
+        return analyze_sentiment, extract_topics, extract_main_entity
 
-def create_spark_session():
-    """Создание сессии Spark"""
-    logger.info("Creating Spark session")
-    return SparkSession.builder \
-        .appName("NewsFeedProcessor") \
-        .config("spark.jars.packages", 
-                "org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.0," +
-                "org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0")\
-        .config("spark.driver.memory", "4g") \
-        .config("spark.executor.memory", "8g") \
-        .getOrCreate()
 
 def read_from_kafka(spark):
-    """Чтение данных из Kafka"""
     logger.info(f"Setting up Kafka stream reader for topic: {KAFKA_TOPIC}")
     return spark.readStream \
         .format("kafka") \
@@ -233,8 +224,20 @@ def read_from_kafka(spark):
         .option("startingOffsets", "latest") \
         .load()
 
+
+def create_spark_session():
+    logger.info("Creating Spark session")
+    return SparkSession.builder \
+        .appName("NewsFeedProcessor") \
+        .config("spark.jars.packages", 
+            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.0," +
+            "org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0")\
+        .config("spark.driver.memory", "4g") \
+        .config("spark.executor.memory", "8g") \
+        .getOrCreate()
+
+
 def write_to_elasticsearch_custom(df, index_name, id_field=None):
-    """Запись данных в Elasticsearch через foreachBatch"""
     logger.info(f"Setting up Elasticsearch stream writer for index: {index_name}")
 
     def process_batch(batch_df, batch_id):
@@ -248,13 +251,13 @@ def write_to_elasticsearch_custom(df, index_name, id_field=None):
                 }
                 if id_field:
                     options["es.mapping.id"] = id_field
-
+                head_pd = batch_df.select("id", "text", "topics").limit(5).toPandas()
+                logger.info(f"Sample batch for ES (first 5):\n{head_pd}")
                 batch_df.write \
                     .format("org.elasticsearch.spark.sql") \
                     .options(**options) \
                     .mode("append") \
                     .save()
-                
                 logger.info(f"Wrote batch {batch_id} to Elasticsearch index {index_name}")
         except Exception as e:
             logger.error(f"Error writing to Elasticsearch: {e}")
@@ -265,25 +268,17 @@ def write_to_elasticsearch_custom(df, index_name, id_field=None):
         .start()
 
 def write_to_mongodb_custom(df, collection_name):
-    """Альтернативная запись в MongoDB через foreachBatch"""
     logger.info(f"Setting up MongoDB stream writer for collection: {collection_name}")
-    
     def process_batch(batch_df, batch_id):
         try:
             if not batch_df.isEmpty():
-                # Convert batch to list of dicts
                 rows = batch_df.toJSON().collect()
                 documents = [json.loads(row) for row in rows]
-                
-                # Write to MongoDB
                 client = MongoClient(MONGODB_URI)
                 db = client[MONGODB_DB]
                 collection = db[collection_name]
-                
                 if documents:
-                    # For upsert, we need to identify documents properly
                     for doc in documents:
-                        # For hourly metrics, use combined key of channel name and window start/end
                         if "window" in doc and "channel_name" in doc:
                             filter_criteria = {
                                 "channel_name": doc["channel_name"],
@@ -291,13 +286,10 @@ def write_to_mongodb_custom(df, collection_name):
                                 "window.end": doc["window"]["end"]
                             }
                             collection.update_one(filter_criteria, {"$set": doc}, upsert=True)
+                        elif "id" in doc:
+                            collection.update_one({"id": doc["id"]}, {"$set": doc}, upsert=True)
                         else:
-                            # For regular docs, use id if available
-                            if "id" in doc:
-                                collection.update_one({"id": doc["id"]}, {"$set": doc}, upsert=True)
-                            else:
-                                collection.insert_one(doc)
-                    
+                            collection.insert_one(doc)
                     logger.info(f"Processed {len(documents)} documents for MongoDB collection {collection_name}")
         except Exception as e:
             logger.error(f"Error writing to MongoDB: {e}")
@@ -310,28 +302,22 @@ def write_to_mongodb_custom(df, collection_name):
 def process_data(df, news_processor):
     """Расширенная обработка данных"""
     logger.info("Processing incoming data stream")
-    
-    # Создание UDF
-    analyze_sentiment, extract_topics = news_processor.create_udfs()
-    
-    # Обработка данных
+    analyze_sentiment, extract_topics, extract_main_entity = news_processor.create_udfs()
     processed_df = df.select(
         col("key").cast("string"),
         from_json(col("value").cast("string"), message_schema).alias("data")
     ).select("data.*")
-
-    # Добавление анализа тональности и тем
     enriched_df = processed_df \
-        .withColumn("sentiment", analyze_sentiment(col("text"))) \
+       .withColumn("sentiment", analyze_sentiment(col("text"))) \
         .withColumn("topics", extract_topics(col("text"))) \
+        .withColumn("main_entity", extract_main_entity(col("text"))) \
         .withColumn("processing_time", current_timestamp()) \
         .withColumn("text_length", length(col("text"))) \
         .withColumn("has_media_int", col("has_media").cast("integer"))
-
     return enriched_df
 
+
 def calculate_channel_metrics(df):
-    """Расчет метрик по каналам"""
     logger.info("Calculating channel metrics")
     return df \
         .groupBy("channel_name") \
@@ -340,63 +326,49 @@ def calculate_channel_metrics(df):
             count("*").alias("message_count"),
             avg("views").alias("avg_views"),
             avg("forwards").alias("avg_forwards"),
-            collect_set("topics").alias("channel_topics")
+            collect_set("topics").alias("channel_topics"),
+            collect_set("main_entity").alias("entities_of_channel")
         )
 
 def main():
-    # Инициализация
     logger.info("Starting News Processor")
     spark = create_spark_session()
     news_processor = NewsProcessor()
-    
+
     try:
-        # Чтение из Kafka
         kafka_df = read_from_kafka(spark)
-        
-        # Основная обработка
         processed_df = process_data(kafka_df, news_processor)
-        
-        # Запись обработанных данных в Elasticsearch
         news_query = write_to_elasticsearch_custom(
-            processed_df, 
-            ELASTICSEARCH_NEWS_INDEX, 
+            processed_df,
+            ELASTICSEARCH_NEWS_INDEX,
             id_field="id"
         )
-        
-        # Создание временных окон для анализа
         windowed_df = processed_df \
             .withWatermark("date", "1 hour") \
             .groupBy(
                 window(col("date"), "1 hour"),
                 col("channel_name")
             )
-        
-        # Агрегации по временным окнам
+
         hourly_metrics = windowed_df.agg(
             avg("sentiment.score").alias("hourly_sentiment"),
             count("*").alias("message_count"),
-            collect_list("topics").alias("hourly_topics")
+            collect_list("topics").alias("hourly_topics"),
+            collect_list("main_entity").alias("main_entities")
         )
-        
-        # Преобразование window структуры для Elasticsearch
         hourly_metrics_flat = hourly_metrics \
             .withColumn("window_start", col("window.start")) \
             .withColumn("window_end", col("window.end")) \
             .drop("window")
-        
-        # Запись метрик в Elasticsearch
         metrics_query = write_to_elasticsearch_custom(
-            hourly_metrics_flat, 
+            hourly_metrics_flat,
             ELASTICSEARCH_METRICS_INDEX
         )
-        
-        # Запись метрик в MongoDB
         mongodb_query = write_to_mongodb_custom(hourly_metrics, "hourly_analytics")
-        
-        # Обновление модели тем периодически
+
         def update_topic_model(batch_df, batch_id):
             try:
-                if batch_id % 100 == 0 and not batch_df.isEmpty():  # Обновление каждые 100 батчей
+                if batch_id % 100 == 0 and not batch_df.isEmpty():
                     sample_size = 1000
                     sampled_data = batch_df.limit(sample_size)
                     text_samples = [row.text for row in sampled_data.select("text").collect() if row.text]
@@ -405,20 +377,17 @@ def main():
                         logger.info(f"Updated topic model with {len(text_samples)} samples")
             except Exception as e:
                 logger.error(f"Error updating topic model: {e}")
-        
-        # Потоковая обработка с обновлением модели
+
         update_query = processed_df.writeStream \
             .foreachBatch(update_topic_model) \
             .option("checkpointLocation", "/tmp/checkpoint/model_updates") \
             .start()
-        
-        # Ожидание завершения
+
         logger.info("All streaming queries started, waiting for termination")
         news_query.awaitTermination()
         metrics_query.awaitTermination()
         mongodb_query.awaitTermination()
         update_query.awaitTermination()
-        
     except Exception as e:
         logger.error(f"Error in main processing: {e}")
     finally:
