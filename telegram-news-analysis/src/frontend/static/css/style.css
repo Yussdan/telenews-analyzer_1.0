@@ -41,7 +41,38 @@ body {
 
 /* Стили для бейджей */
 .badge {
-    margin-right: 0.25rem;
+    display: inline-block;
+    padding: .25em .4em;
+    font-size: 75%;
+    font-weight: 700;
+    line-height: 1;
+    text-align: center;
+    white-space: nowrap;
+    vertical-align: baseline;
+    border-radius: .25rem;
+    color: white;
+    margin-right: 5px;
+}
+
+.bg-success {
+    background-color: #28a745 !important;
+}
+
+.bg-danger {
+    background-color: #dc3545 !important;
+}
+
+.bg-secondary {
+    background-color: #6c757d !important;
+}
+
+.bg-info {
+    background-color: #17a2b8 !important;
+}
+
+.mx-1 {
+    margin-left: .25rem !important;
+    margin-right: .25rem !important;
 }
 
 /* Стиль для канальной информации */
@@ -113,6 +144,128 @@ body {
     from { opacity: 0; }
     to { opacity: 1; }
 }
+
+.report-container {
+    background-color: #fff;
+    border-radius: 0.5rem;
+    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+    padding: 2rem;
+}
+
+.report-content {
+    line-height: 1.7;
+    font-size: 1.1rem;
+}
+
+.report-content h4 {
+    margin-top: 1.75rem;
+    margin-bottom: 1rem;
+    color: #0d6efd;
+    font-weight: 600;
+}
+
+.report-content p {
+    margin-bottom: 1.25rem;
+    text-align: justify;
+}
+
+.report-content ul {
+    margin-bottom: 1.25rem;
+    padding-left: 1.5rem;
+}
+
+.report-content li {
+    margin-bottom: 0.5rem;
+}
+
+.report-header {
+    border-bottom: 1px solid #dee2e6;
+    padding-bottom: 1.25rem;
+}
+
+/* Стили для отчетов */
+.report-container {
+    background-color: #fff;
+    border-radius: 0.5rem;
+    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+    padding: 2rem;
+}
+
+.report-content {
+    line-height: 1.7;
+    font-size: 1.1rem;
+}
+
+.report-content h4 {
+    margin-top: 1.75rem;
+    margin-bottom: 1rem;
+    color: #0d6efd;
+    font-weight: 600;
+}
+
+.report-content p {
+    margin-bottom: 1.25rem;
+    text-align: justify;
+}
+
+.report-content ul {
+    margin-bottom: 1.25rem;
+    padding-left: 1.5rem;
+}
+
+.report-content li {
+    margin-bottom: 0.5rem;
+}
+
+.report-header {
+    border-bottom: 1px solid #dee2e6;
+    padding-bottom: 1.25rem;
+}
+
+.report-footer {
+    border-top: 1px solid #dee2e6;
+    padding-top: 1.25rem;
+    margin-top: 2rem;
+}
+
+@media print {
+    body {
+        padding: 2cm;
+        font-size: 12pt;
+    }
+    
+    .report-container {
+        box-shadow: none;
+        padding: 0;
+    }
+    
+    .btn {
+        display: none !important;
+    }
+}
+
+.report-footer {
+    border-top: 1px solid #dee2e6;
+    padding-top: 1.25rem;
+    margin-top: 2rem;
+}
+
+@media print {
+    body {
+        padding: 2cm;
+        font-size: 12pt;
+    }
+    
+    .report-container {
+        box-shadow: none;
+        padding: 0;
+    }
+    
+    .btn {
+        display: none !important;
+    }
+}
+
 
 /* Стили для индикаторов загрузки */
 .spinner-container {

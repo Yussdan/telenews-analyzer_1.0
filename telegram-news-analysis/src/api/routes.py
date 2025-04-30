@@ -3,6 +3,9 @@ import logging
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
 import traceback
+import json
+import os
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -350,7 +353,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     "warning": "No channels configured",
                     "trends": {
                         "topics": [],
-                        "entities": {},
+                        "entities": [],
                         "sentiments": []
                     },
                     "period": time_period
@@ -386,10 +389,24 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     }
                 },
                 "aggs": {
-                    "topics": {
+                    "topics_nested": {
+                        "nested": {
+                            "path": "topics"
+                        },
+                        "aggs": {
+                            "topic_labels": {
+                                "terms": {
+                                    "field": "topics.label",
+                                    "size": 20
+                                }
+                            }
+                        }
+                    },
+                    "main_entities": {
                         "terms": {
-                            "field": "topics.keyword",
-                            "size": 20
+                            "field": "main_entity.name",
+                            "size": 20,
+                            "missing": "Unknown"
                         }
                     },
                     "channels": {
@@ -431,18 +448,32 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                 
             # Execute the query
             try:
+                logger.debug(f"Elasticsearch trends query: {query}")
                 result = es.search(index=app.config['ELASTICSEARCH_INDEX'], body=query)
+                logger.debug(f"Elasticsearch trends result: {result}")
             except Exception as e:
                 logger.error(f"Elasticsearch aggregation failed: {e}")
                 logger.debug(traceback.format_exc())
                 return jsonify({"error": "Analytics request failed", "details": str(e)}), 500
             
             # Process the results
-            # Extract topics
-            topics = [
-                {"topic": bucket["key"], "count": bucket["doc_count"]} 
-                for bucket in result["aggregations"]["topics"]["buckets"]
-            ]
+            # Extract topics from nested aggregation
+            topics = []
+            if "topics_nested" in result["aggregations"]:
+                topics = [
+                    {"topic": bucket["key"], "count": bucket["doc_count"]} 
+                    for bucket in result["aggregations"]["topics_nested"]["topic_labels"]["buckets"]
+                    if bucket["key"]  # Filter out empty keys
+                ]
+            
+            # Extract entities
+            entities = []
+            if "main_entities" in result["aggregations"]:
+                entities = [
+                    {"entity": bucket["key"], "count": bucket["doc_count"]} 
+                    for bucket in result["aggregations"]["main_entities"]["buckets"]
+                    if bucket["key"] and bucket["key"] != "Unknown"  # Filter out empty and "Unknown" entities
+                ]
             
             # Extract sentiment distribution
             sentiments = [
@@ -469,9 +500,15 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                 for time_bucket in result["aggregations"]["hourly_activity"]["buckets"]
             ]
             
+            # Log results for debugging
+            logger.info(f"Topics found: {len(topics)}")
+            logger.info(f"Entities found: {len(entities)}")
+            logger.info(f"Sentiments found: {len(sentiments)}")
+            
             return jsonify({
                 "trends": {
                     "topics": topics,
+                    "entities": entities,
                     "sentiments": sentiments,
                     "channels": channels,
                     "hourly_activity": hourly_activity
@@ -484,6 +521,203 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             logger.debug(traceback.format_exc())
             return jsonify({"error": "Failed to retrieve trends", "details": str(e)}), 500
     
+    @app.route('/api/reports/generate', methods=['POST'])
+    @token_required
+    def generate_report():
+        """Генерация отчета по сущности или теме с использованием LLM"""
+        try:
+            user_id = request.user.get('id')
+            data = request.json
+            
+            if not data:
+                return jsonify({"error": "No data provided"}), 400
+                
+            report_type = data.get('type', 'entity')  # entity или topic
+            entity_or_topic = data.get('entity_or_topic')
+            time_period = data.get('period', '7d')  # Период времени для анализа
+            
+            if not entity_or_topic:
+                return jsonify({"error": "Entity or topic name is required"}), 400
+                
+            # Получить список каналов пользователя
+            user_channels = get_filtered_query(user_id, pg_manager)
+            
+            # Определение временного диапазона
+            time_range_map = {
+                "1d": "now-1d",
+                "7d": "now-7d",
+                "30d": "now-30d",
+                "90d": "now-90d"
+            }
+            time_range = time_range_map.get(time_period, "now-7d")
+            
+            # Построить Elasticsearch запрос для получения релевантных новостей
+            if report_type == 'entity':
+                # Запрос для сущности (используем несколько способов поиска)
+                query = {
+                    "query": {
+                        "bool": {
+                            "must": [
+                                {"terms": {"channel_name.keyword": user_channels}},
+                                {"range": {"date": {"gte": time_range, "lte": "now"}}},
+                            ],
+                            "should": [
+                                {"match": {"main_entity.name": entity_or_topic}},
+                                {"match": {"text": entity_or_topic}},  # Искать также в тексте
+                                {"nested": {
+                                    "path": "entity_mentions",
+                                    "query": {
+                                        "match": {"entity_mentions.entity_name": entity_or_topic}
+                                    }
+                                }}
+                            ],
+                            "minimum_should_match": 1
+                        }
+                    },
+                    "sort": [{"date": {"order": "desc"}}],
+                    "size": 20
+                }
+            else:
+                # Запрос для темы (используем и nested запрос и обычный поиск)
+                query = {
+                    "query": {
+                        "bool": {
+                            "must": [
+                                {"terms": {"channel_name.keyword": user_channels}},
+                                {"range": {"date": {"gte": time_range, "lte": "now"}}},
+                            ],
+                            "should": [
+                                {
+                                    "nested": {
+                                        "path": "topics",
+                                        "query": {
+                                            "match": {"topics.label": entity_or_topic}
+                                        }
+                                    }
+                                },
+                                {"match": {"text": entity_or_topic}}  # Искать также в тексте
+                            ],
+                            "minimum_should_match": 1
+                        }
+                    },
+                    "sort": [{"date": {"order": "desc"}}],
+                    "size": 20
+                }
+            
+            # Выполнить запрос
+            if not es:
+                return jsonify({"error": "Elasticsearch not available"}), 503
+                
+            result = es.search(index=app.config['ELASTICSEARCH_INDEX'], body=query)
+            
+            # Обработать результаты
+            if result['hits']['total']['value'] == 0:
+                return jsonify({
+                    "error": f"No news found for {report_type} '{entity_or_topic}' in the selected period"
+                }), 404
+                
+            # Подготовка данных для LLM в более чистом формате
+            news_items_text = ""
+            for i, hit in enumerate(result['hits']['hits'], 1):
+                source = hit['_source']
+                date_str = source.get('date')
+                try:
+                    # Преобразуем timestamp в читаемую дату
+                    date_ms = int(date_str)
+                    date_readable = datetime.fromtimestamp(date_ms/1000).strftime('%d.%m.%Y')
+                except:
+                    date_readable = date_str
+                    
+                news_items_text += f"\nНовость #{i}:\n"
+                news_items_text += f"Дата: {date_readable}\n"
+                news_items_text += f"Канал: {source.get('channel_name')}\n"
+                news_items_text += f"Текст: {source.get('text')}\n"
+                news_items_text += f"Тональность: {source.get('sentiment', {}).get('label', 'neutral')}\n"
+                news_items_text += "-"*50 + "\n"
+            
+            # Формируем понятный текстовый запрос вместо JSON
+            llm_prompt = f"""
+            Задача: Сгенерировать аналитический отчет по {'сущности' if report_type == 'entity' else 'теме'} "{entity_or_topic}" за последний {"день" if time_period == "1d" else "неделю" if time_period == "7d" else "месяц" if time_period == "30d" else "квартал"}.
+
+            Исходные новости:
+            {news_items_text}
+
+            Пожалуйста, составь подробный аналитический отчет, включающий:
+            1. Общую тенденцию (позитивная/негативная/нейтральная)
+            2. Основные события и их влияние
+            3. Ключевые факты и цифры из новостей
+            4. Изменения в отношении к {'сущности' if report_type == 'entity' else 'теме'} за этот период
+            5. Прогноз дальнейшего развития ситуации
+
+            Представь информацию в структурированном виде с заголовками разделов.
+            Сосредоточься именно на "{entity_or_topic}" и информации, которая непосредственно относится к этой {'сущности' if report_type == 'entity' else 'теме'}.
+            """
+            
+            # Вызов LLM API
+            llm_url = app.config.get('LLM_URL') or os.environ.get('LOCAL_LLM_URL', 'http://llm-service:8000/generate')
+            
+            try:
+                llm_response = requests.post(
+                    llm_url,
+                    json={"prompt": llm_prompt, "max_tokens": 1500, "temperature": 0.7},
+                    timeout=180,  # Увеличенный таймаут для генерации отчета
+                    is_report=True
+                )
+                
+                if llm_response.status_code != 200:
+                    logger.error(f"LLM API error: {llm_response.text}")
+                    raise Exception(f"LLM API returned status code {llm_response.status_code}")
+                    
+                llm_result = llm_response.json()
+                report_text = llm_result.get('generated_text', '')
+                
+                if not report_text:
+                    logger.warning("LLM returned empty response")
+                    raise Exception("LLM returned empty response")
+                    
+                # Очистка отчета от возможных JSON-артефактов
+                report_text = report_text.strip()
+                if report_text.startswith('", "') or report_text.startswith('"}') or report_text.startswith('"]:'):
+                    # Обрезаем некорректные JSON-фрагменты в начале
+                    report_text = report_text.split('\n', 1)[1] if '\n' in report_text else ""
+                    
+                if report_text.endswith('",') or report_text.endswith('"}') or report_text.endswith('":'):
+                    # Обрезаем некорректные JSON-фрагменты в конце
+                    report_text = report_text.rsplit('\n', 1)[0] if '\n' in report_text else ""
+                    
+                # Подготовка итогового ответа
+                return jsonify({
+                    "report": {
+                        "type": report_type,
+                        "entity_or_topic": entity_or_topic,
+                        "period": time_period,
+                        "generated_text": report_text,
+                        "news_count": len(result['hits']['hits']),
+                        "generated_at": datetime.now().isoformat()
+                    }
+                })
+                
+            except Exception as e:
+                logger.error(f"Error generating report with LLM: {e}")
+                logger.debug(traceback.format_exc())
+                # Вернуть данные без отчета LLM в случае ошибки
+                return jsonify({
+                    "error": f"Failed to generate report: {str(e)}",
+                    "raw_data": {
+                        "type": report_type,
+                        "entity_or_topic": entity_or_topic,
+                        "period": time_period,
+                        "news_count": len(result['hits']['hits']),
+                        "news_sample": news_items_text[:1000]  # Первые 1000 символов текста новостей для отладки
+                    }
+                }), 500
+                
+        except Exception as e:
+            logger.error(f"Error in generate_report: {e}")
+            logger.debug(traceback.format_exc())
+            return jsonify({"error": f"Failed to generate report: {str(e)}"}), 500
+
+
     @app.route('/api/channels', methods=['GET'])
     @token_required
     def get_channels():

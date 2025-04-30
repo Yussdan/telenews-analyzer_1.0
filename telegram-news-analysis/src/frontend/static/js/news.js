@@ -77,10 +77,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function renderNews(items, fresh = false) {
         if (items.length === 0 && fresh) {
-            newsResults.innerHTML = `<div class="alert alert-info">Ничего не найдено</div>`;
+            newsResults.innerHTML = `<div class="no-results">Ничего не найдено</div>`;
             return;
         }
-
+    
         let html = "";
         for (const item of items) {
             const date = new Date(item.date).toLocaleString("ru-RU");
@@ -89,37 +89,115 @@ document.addEventListener("DOMContentLoaded", () => {
                 negative: { class: "bg-danger", label: "Негативно" },
                 neutral: { class: "bg-secondary", label: "Нейтрально" },
             };
+    
+            // Исправленная обработка тональности
+            let sentimentHtml = "";
+            if (item.sentiment && item.sentiment.label) {
+                const sentimentKey = item.sentiment.label;
+                const sentimentInfo = sentimentMap[sentimentKey] || sentimentMap["neutral"];
+                const score = item.sentiment.score ? Math.round(item.sentiment.score * 100) : "";
+                const scoreText = score ? ` (${score}%)` : "";
+                sentimentHtml = `<span class="badge ${sentimentInfo.class}">${sentimentInfo.label}${scoreText}</span>`;
+            }
+    
+            // Исправленная обработка тем
+            let topicsHtml = "";
+            if (item.topics && Array.isArray(item.topics)) {
+                // Фильтрация тем - проверяем, что тема релевантна тексту
+                const keywords = extractKeywords(item.text.toLowerCase());
+                
+                topicsHtml = item.topics
+                    .filter(topic => {
+                        // Получаем метку темы
+                        const topicLabel = typeof topic === 'object' && topic.label 
+                            ? topic.label.toLowerCase() 
+                            : (typeof topic === 'string' ? topic.toLowerCase() : "");
+                        
+                        // Проверяем, содержит ли текст слова из темы
+                        return keywords.some(keyword => topicLabel.includes(keyword));
+                    })
+                    .map(topic => {
+                        const topicLabel = typeof topic === 'object' && topic.label 
+                            ? topic.label 
+                            : (typeof topic === 'string' ? topic : "");
+                        
+                        if (topicLabel) {
+                            return `<span class="badge bg-info mx-1">${topicLabel}</span>`;
+                        }
+                        return "";
+                    })
+                    .join("");
+                 // Если после фильтрации не осталось тем, попробуем извлечь из текста
+            if (!topicsHtml && item.text) {
+                const extractedTopics = extractTopicsFromText(item.text);
+                topicsHtml = extractedTopics.map(topic => 
+                    `<span class="badge bg-info mx-1">${topic}</span>`
+                ).join("");
+                }
+            }
+            function extractKeywords(text) {
+                // Удаляем пунктуацию и разбиваем на слова
+                const words = text.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").split(/\s+/);
+                
+                // Фильтруем слова длиннее 4 символов и не являющиеся стоп-словами
+                const stopWords = ["этот", "быть", "весь", "этот", "один", "такой", "чтобы", "который"];
+                return words.filter(word => word.length > 4 && !stopWords.includes(word));
+            }
+            function extractTopicsFromText(text) {
+                // Проверяем наличие ключевых слов для определенных тем
+                const topicMappings = {
+                    "Экология": ["экологи", "загрязнен", "воздух", "окружающ"],
+                    "Концерты": ["концерт", "выступлен", "билет", "зал", "сцен"],
+                    "Знаменитости": ["брежнев", "певиц", "артист", "звезд"],
+                    "Политика": ["власт", "правительств", "президент", "политик"],
+                    "Путешествия": ["путешеств", "поездк", "страна"]
+                };
+                const lowerText = text.toLowerCase();
+                const foundTopics = [];
+                
+                for (const [topic, keywords] of Object.entries(topicMappings)) {
+                    if (keywords.some(keyword => lowerText.includes(keyword))) {
+                        foundTopics.push(topic);
+                    }
+                }
+                
+                return foundTopics;
+            }
+                
 
-            const sentiment = item.sentiment?.label;
-            const badge = sentiment ? sentimentMap[sentiment] || sentimentMap["neutral"] : null;
-            const sentimentHtml = badge ? `<span class="badge ${badge.class}">${badge.label}</span>` : "";
-
-            const topicsHtml = (item.topics || [])
-                .map(topic => `<span class="badge bg-info me-1">${topic}</span>`)
-                .join("");
-
+    
+            // Исправленная обработка основной сущности
+            let entityHtml = "";
+            if (item.main_entity && item.main_entity.name) {
+                entityHtml = `<span class="badge bg-primary mx-1">${item.main_entity.name}</span>`;
+            }
+    
             html += `
-                <div class="card mb-3 shadow-sm">
+                <div class="card fade-in">
                     <div class="card-body">
                         <div class="d-flex justify-content-between">
-                            <h5 class="card-title mb-2">От: ${item.channel_name}</h5>
+                            <h5 class="card-title">От: ${item.channel_name}</h5>
                             <small class="text-muted">${date}</small>
                         </div>
                         <p class="card-text">${item.text}</p>
-                        <div class="d-flex justify-content-between align-items-center">
-                            <div>${sentimentHtml} ${topicsHtml}</div>
-                            <div class="text-muted"><small>Просмотры: ${item.views ?? "N/A"}</small></div>
+                        <div class="d-flex justify-content-between">
+                            <div>
+                                ${sentimentHtml} ${topicsHtml} ${entityHtml}
+                            </div>
+                            <div><small class="text-muted">Просмотры: ${item.views ?? "N/A"}</small></div>
                         </div>
                     </div>
                 </div>`;
         }
-
+    
         if (fresh) {
             newsResults.innerHTML = html;
         } else {
             newsResults.insertAdjacentHTML("beforeend", html);
         }
     }
+    
+    
 
     // Инициализация
     fetchChannels();

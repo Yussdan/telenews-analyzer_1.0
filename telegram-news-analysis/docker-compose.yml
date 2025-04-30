@@ -3,6 +3,10 @@ services:
     image: postgres:15-alpine
     container_name: telegram_postgres
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U telegram_news"]
       interval: 10s
@@ -20,6 +24,37 @@ services:
     networks:
       - telegram_news_network
 
+  llm-service:
+    build:
+      context: ./src/llm
+      dockerfile: Dockerfile
+    container_name: telegram-news-llm
+    environment:
+      - MODEL_PATH=/app/models/mistral-7b-instruct-q4_0.gguf
+      - LLAMA_PORT=8080
+      - MAX_RETRIES=3
+      - RETRY_DELAY=5
+      - LLAMA_TIMEOUT=60
+    volumes:
+      - ./models:/app/models:ro
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        limits:
+          cpus: '6'
+          memory: 10G
+    restart: unless-stopped
+    networks:
+      - telegram_news_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+
+
   kafka:
     image: bitnami/kafka:latest
     container_name: kafka
@@ -35,6 +70,10 @@ services:
       KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
       KAFKA_CFG_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
       KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+    deploy:
+      resources:
+        limits:
+          memory: 2G
     healthcheck:
       test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9092'"]
       interval: 1s
@@ -172,9 +211,13 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      llm-service:
+        condition: service_healthy
     environment:
       - SPARK_MASTER=spark://spark-master:7077
       - KAFKA_BROKERS=kafka:9092
+      - CONNECTION_TIMEOUT=120
+      - POSTGRES_URI=postgresql://telegram_news:telegram_password@postgres:5432/telegram_news
     env_file:
       - .env
     networks:
@@ -229,3 +272,4 @@ volumes:
   spark-master-logs:
   spark-worker-logs:
   spark-checkpoints:
+  models:

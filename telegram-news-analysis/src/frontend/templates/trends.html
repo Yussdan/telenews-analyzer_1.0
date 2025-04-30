@@ -3,31 +3,33 @@
 {% block title %}Тренды | Анализ новостей в Telegram{% endblock %}
 
 {% block content %}
-<div class="row mb-4">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-body">
-                <h2 class="card-title">Тренды и аналитика</h2>
-                
-                <div class="mb-4">
-                    <form id="trendForm" class="row g-3">
-                        <div class="col-md-4">
-                            <select class="form-select" id="periodSelect">
-                                <option value="24h">За 24 часа</option>
-                                <option value="7d">За 7 дней</option>
-                                <option value="1h">За 1 час</option>
-                            </select>
-                        </div>
-                        <div class="col-md-2">
-                            <button type="submit" class="btn btn-primary w-100">Обновить</button>
-                        </div>
-                    </form>
-                </div>
-                
-                <div id="trendsResults">
-                    <div class="d-flex justify-content-center">
-                        <div class="spinner-border" role="status">
-                            <span class="visually-hidden">Загрузка...</span>
+<div class="container mt-4">
+    <div class="row">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-body">
+                    <h2 class="card-title">Тренды и аналитика</h2>
+                    
+                    <div class="mb-4">
+                        <form id="trendForm" class="row g-3">
+                            <div class="col-md-10">
+                                <select class="form-select" id="periodSelect">
+                                    <option value="24h">За 24 часа</option>
+                                    <option value="7d">За 7 дней</option>
+                                    <option value="1h">За 1 час</option>
+                                </select>
+                            </div>
+                            <div class="col-md-2">
+                                <button type="submit" class="btn btn-primary w-100">Обновить</button>
+                            </div>
+                        </form>
+                    </div>
+                    
+                    <div id="trendsResults">
+                        <div class="spinner-container">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">Загрузка...</span>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -36,156 +38,197 @@
     </div>
 </div>
 
-<div class="row">
-    <div class="col-md-6 mb-4">
-        <div class="card">
-            <div class="card-body">
-                <h5 class="card-title">Популярные темы</h5>
-                <canvas id="topicsChart"></canvas>
+<div class="container mt-4">
+    <div class="row">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Популярные темы</h5>
+                    <canvas id="topicsChart"></canvas>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Распределение тональности</h5>
+                    <canvas id="sentimentChart"></canvas>
+                </div>
             </div>
         </div>
     </div>
-    
-    <div class="col-md-6 mb-4">
-        <div class="card">
-            <div class="card-body">
-                <h5 class="card-title">Распределение тональности</h5>
-                <canvas id="sentimentChart"></canvas>
+</div>
+<!-- Добавьте эту секцию после существующих карточек -->
+<!-- Датасписки для автозаполнения -->
+<datalist id="topicsList"></datalist>
+<datalist id="entitiesList"></datalist>
+
+<!-- Форма отчетов -->
+<div class="container mt-4">
+    <div class="row">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-body">
+                    <h2 class="card-title">Аналитические отчеты</h2>
+                    
+                    <div class="mb-4">
+                        <form id="reportForm" class="row g-3">
+                            <div class="col-md-3">
+                                <select class="form-select" id="reportType">
+                                    <option value="entity">По сущности</option>
+                                    <option value="topic">По теме</option>
+                                </select>
+                            </div>
+                            <div class="col-md-5">
+                                <input type="text" class="form-control" id="entityOrTopic" list="entitiesList" placeholder="Введите название сущности">
+                            </div>
+                            <div class="col-md-2">
+                                <select class="form-select" id="reportPeriod">
+                                    <option value="7d">7 дней</option>
+                                    <option value="1d">1 день</option>
+                                    <option value="30d">30 дней</option>
+                                    <option value="90d">90 дней</option>
+                                </select>
+                            </div>
+                            <div class="col-md-2">
+                                <button type="submit" class="btn btn-primary w-100">Сгенерировать</button>
+                            </div>
+                        </form>
+                    </div>
+                    
+                    <div id="reportResults" class="mt-4">
+                        <p class="text-muted text-center">Введите название сущности или темы и нажмите "Сгенерировать" для создания аналитического отчета.</p>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
 </div>
 {% endblock %}
-
 {% block scripts %}
 <script>
     let topicsChart = null;
     let sentimentChart = null;
+function loadTrends() {
+    const period = document.getElementById('periodSelect').value;
     
-    // Функция для загрузки трендов
-    function loadTrends() {
-        const period = document.getElementById('periodSelect').value;
-        
-        document.getElementById('trendsResults').innerHTML = `
-            <div class="d-flex justify-content-center">
-                <div class="spinner-border" role="status">
-                    <span class="visually-hidden">Загрузка...</span>
-                </div>
-            </div>`;
-        
-        fetch(`/api/proxy/trends?period=${period}`)
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error('Network response was not ok');
-                }
-                return response.json();
-            })
-            .then(data => {
-                const trends = data.trends;
-                
-                // Отображение результатов
-                let trendsHtml = `<h4>Результаты за ${
-                    period === '24h' ? 'последние 24 часа' : 
-                    period === '7d' ? 'последнюю неделю' : 
-                    'последний час'
-                }</h4>`;
-                
-                // Популярные темы
-                trendsHtml += '<div class="card mb-3"><div class="card-body">';
-                trendsHtml += '<h5 class="card-title">Популярные темы</h5>';
-                
-                if (trends.topics && trends.topics.length > 0) {
-                    trendsHtml += '<ul class="list-group">';
-                    for (const topic of trends.topics.slice(0, 10)) {
-                        trendsHtml += `
-                            <li class="list-group-item d-flex justify-content-between align-items-center">
-                                ${topic.topic}
-                                <span class="badge bg-primary rounded-pill">${topic.count}</span>
-                            </li>`;
-                    }
-                    trendsHtml += '</ul>';
-                } else {
-                    trendsHtml += '<p class="text-muted">Нет данных о популярных темах</p>';
-                }
-                
-                trendsHtml += '</div></div>';
-                
-                // Популярные сущности
-                trendsHtml += '<div class="card mb-3"><div class="card-body">';
-                trendsHtml += '<h5 class="card-title">Популярные сущности</h5>';
-                
-                if (trends.entities && Object.keys(trends.entities).length > 0) {
-                    for (const [type, entities] of Object.entries(trends.entities)) {
-                        if (entities.length > 0) {
-                            trendsHtml += `<h6 class="mt-3">${type}</h6>`;
-                            trendsHtml += '<ul class="list-group">';
-                            for (const entity of entities.slice(0, 5)) {
-                                trendsHtml += `
-                                    <li class="list-group-item d-flex justify-content-between align-items-center">
-                                        ${entity.entity}
-                                        <span class="badge bg-info rounded-pill">${entity.count}</span>
-                                    </li>`;
-                            }
-                            trendsHtml += '</ul>';
-                        }
-                    }
-                } else {
-                    trendsHtml += '<p class="text-muted">Нет данных о популярных сущностях</p>';
-                }
-                
-                trendsHtml += '</div></div>';
-                
-                // Тональность
-                trendsHtml += '<div class="card mb-3"><div class="card-body">';
-                trendsHtml += '<h5 class="card-title">Распределение тональности</h5>';
-                
-                if (trends.sentiments && trends.sentiments.length > 0) {
-                    trendsHtml += '<ul class="list-group">';
-                    for (const sentiment of trends.sentiments) {
-                        let badgeClass = '';
-                        let sentimentText = '';
-                        
-                        switch(sentiment.sentiment) {
-                            case 'positive':
-                                badgeClass = 'bg-success';
-                                sentimentText = 'Позитивно';
-                                break;
-                            case 'negative':
-                                badgeClass = 'bg-danger';
-                                sentimentText = 'Негативно';
-                                break;
-                            default:
-                                badgeClass = 'bg-secondary';
-                                sentimentText = 'Нейтрально';
-                        }
-                        
-                        trendsHtml += `
-                            <li class="list-group-item d-flex justify-content-between align-items-center">
-                                ${sentimentText}
-                                <span class="badge ${badgeClass} rounded-pill">${sentiment.count}</span>
-                            </li>`;
-                    }
-                    trendsHtml += '</ul>';
-                } else {
-                    trendsHtml += '<p class="text-muted">Нет данных о тональности</p>';
-                }
-                
-                trendsHtml += '</div></div>';
-                
-                document.getElementById('trendsResults').innerHTML = trendsHtml;
-                
-                // Создание графиков
-                createCharts(trends);
-            })
-            .catch(error => {
-                console.error('Error loading trends:', error);
-                document.getElementById('trendsResults').innerHTML = `
-                    <div class="alert alert-danger">
-                        Произошла ошибка при загрузке трендов. Пожалуйста, попробуйте позже.
-                    </div>`;
-            });
-    }
+    document.getElementById('trendsResults').innerHTML = `
+        <div class="spinner-container">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Загрузка...</span>
+            </div>
+        </div>`;
     
+    fetch(`/api/proxy/trends?period=${period}`)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('Network response was not ok');
+            }
+            return response.json();
+        })
+        .then(data => {
+            console.log("Trends data:", data); // Отладочный вывод
+
+            const trends = data.trends || {};
+            
+            // Отображение результатов
+            let trendsHtml = `<h4>Результаты за ${
+                period === '24h' ? 'последние 24 часа' : 
+                period === '7d' ? 'последнюю неделю' : 
+                'последний час'
+            }</h4>`;
+            
+            // Популярные темы
+            trendsHtml += '<div class="card mb-3"><div class="card-body">';
+            trendsHtml += '<h5 class="card-title">Популярные темы</h5>';
+            
+            if (trends.topics && trends.topics.length > 0) {
+                trendsHtml += '<ul class="list-group">';
+                for (const topic of trends.topics.slice(0, 10)) {
+                    trendsHtml += `
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            ${topic.topic}
+                            <span class="badge bg-primary rounded-pill">${topic.count}</span>
+                        </li>`;
+                }
+                trendsHtml += '</ul>';
+            } else {
+                trendsHtml += '<p class="text-muted">Нет данных о популярных темах</p>';
+            }
+            
+            trendsHtml += '</div></div>';
+            
+            // Популярные сущности
+            trendsHtml += '<div class="card mb-3"><div class="card-body">';
+            trendsHtml += '<h5 class="card-title">Популярные сущности</h5>';
+            
+            if (trends.entities && trends.entities.length > 0) {
+                trendsHtml += '<ul class="list-group">';
+                for (const entity of trends.entities.slice(0, 10)) {
+                    trendsHtml += `
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            ${entity.entity}
+                            <span class="badge bg-info rounded-pill">${entity.count}</span>
+                        </li>`;
+                }
+                trendsHtml += '</ul>';
+            } else {
+                trendsHtml += '<p class="text-muted">Нет данных о популярных сущностях</p>';
+            }
+            
+            trendsHtml += '</div></div>';
+            
+            // Тональность
+            trendsHtml += '<div class="card mb-3"><div class="card-body">';
+            trendsHtml += '<h5 class="card-title">Распределение тональности</h5>';
+            
+            if (trends.sentiments && trends.sentiments.length > 0) {
+                trendsHtml += '<ul class="list-group">';
+                for (const sentiment of trends.sentiments) {
+                    let badgeClass = '';
+                    let sentimentText = '';
+                    
+                    switch(sentiment.sentiment) {
+                        case 'positive':
+                            badgeClass = 'bg-success';
+                            sentimentText = 'Позитивно';
+                            break;
+                        case 'negative':
+                            badgeClass = 'bg-danger';
+                            sentimentText = 'Негативно';
+                            break;
+                        default:
+                            badgeClass = 'bg-secondary';
+                            sentimentText = 'Нейтрально';
+                    }
+                    
+                    trendsHtml += `
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            ${sentimentText}
+                            <span class="badge ${badgeClass} rounded-pill">${sentiment.count}</span>
+                        </li>`;
+                }
+                trendsHtml += '</ul>';
+            } else {
+                trendsHtml += '<p class="text-muted">Нет данных о тональности</p>';
+            }
+            
+            trendsHtml += '</div></div>';
+            
+            document.getElementById('trendsResults').innerHTML = trendsHtml;
+            
+            // Создание графиков
+            createCharts(trends);
+        })
+        .catch(error => {
+            console.error('Error loading trends:', error);
+            document.getElementById('trendsResults').innerHTML = `
+                <div class="alert alert-danger">
+                    Произошла ошибка при загрузке трендов. Пожалуйста, попробуйте позже.
+                </div>`;
+        });
+} 
     // Функция для создания графиков
     function createCharts(trends) {
         // График тем
@@ -210,6 +253,7 @@
                     }]
                 },
                 options: {
+                    responsive: true,
                     scales: {
                         y: {
                             beginAtZero: true
@@ -268,17 +312,356 @@
                     }
                 }
             });
+        } else {
+            // Очистка графика, если нет данных
+            const ctx = document.getElementById('sentimentChart').getContext('2d');
+            if (sentimentChart) {
+                sentimentChart.destroy();
+            }
+            ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+            ctx.font = '14px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('Нет данных о тональности', ctx.canvas.width/2, ctx.canvas.height/2);
         }
     }
     
     // Обработчики событий
     document.addEventListener('DOMContentLoaded', function() {
-        loadTrends();
+        // Проверяем наличие Chart.js
+        if (typeof Chart === 'undefined') {
+            console.error('Chart.js not loaded. Please include Chart.js library.');
+            // Добавляем Chart.js если он отсутствует
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/chart.js';
+            script.onload = function() {
+                loadTrends();
+            };
+            document.head.appendChild(script);
+        } else {
+            loadTrends();
+        }
         
         document.getElementById('trendForm').addEventListener('submit', function(e) {
             e.preventDefault();
             loadTrends();
         });
     });
+    // Добавьте в уже существующий скрипт:
+
+// Функция генерации отчета
+// Функция для загрузки доступных тем и сущностей
+function loadEntitiesAndTopics() {
+    fetch('/api/proxy/trends?period=30d')
+        .then(response => response.json())
+        .then(data => {
+            console.log("Loaded trends for suggestions:", data);
+            if (data.trends) {
+                // Заполняем датасписки для автозаполнения
+                const topicsList = document.getElementById('topicsList');
+                const entitiesList = document.getElementById('entitiesList');
+                
+                if (topicsList && entitiesList) {
+                    // Очищаем существующие опции
+                    topicsList.innerHTML = '';
+                    entitiesList.innerHTML = '';
+                    
+                    // Добавляем темы
+                    if (data.trends.topics && data.trends.topics.length > 0) {
+                        data.trends.topics.forEach(topic => {
+                            const option = document.createElement('option');
+                            option.value = topic.topic;
+                            topicsList.appendChild(option);
+                        });
+                    }
+                    
+                    // Добавляем сущности
+                    if (data.trends.entities && data.trends.entities.length > 0) {
+                        data.trends.entities.forEach(entity => {
+                            const option = document.createElement('option');
+                            option.value = entity.entity;
+                            entitiesList.appendChild(option);
+                        });
+                    }
+                } else {
+                    console.warn("Datalists not found in the DOM");
+                }
+            }
+        })
+        .catch(error => {
+            console.error('Error loading entities and topics:', error);
+        });
+}
+
+// Функция для обновления списка подсказок в зависимости от выбранного типа
+function updateSuggestionList() {
+    const reportType = document.getElementById('reportType');
+    const entityOrTopicInput = document.getElementById('entityOrTopic');
+    
+    if (!reportType || !entityOrTopicInput) {
+        console.warn("Elements not found for suggestion list update");
+        return;
+    }
+    
+    if (reportType.value === 'entity') {
+        entityOrTopicInput.setAttribute('list', 'entitiesList');
+        entityOrTopicInput.placeholder = 'Введите название сущности';
+    } else {
+        entityOrTopicInput.setAttribute('list', 'topicsList');
+        entityOrTopicInput.placeholder = 'Введите название темы';
+    }
+}
+
+// Функция для получения текстового представления периода
+function getPeriodText(period) {
+    switch(period) {
+        case '1d': return 'последние 24 часа';
+        case '7d': return 'последняя неделя';
+        case '30d': return 'последний месяц';
+        case '90d': return 'последние 3 месяца';
+        default: return period;
+    }
+}
+
+// Функция для форматирования даты
+function formatDate(dateString) {
+    const date = new Date(dateString);
+    return date.toLocaleString('ru-RU');
+}
+
+// Функция для печати отчета
+function printReport() {
+    const printContents = document.querySelector('.report-container').innerHTML;
+    const originalContents = document.body.innerHTML;
+    
+    document.body.innerHTML = `
+        <div class="container mt-4">
+            ${printContents}
+        </div>
+    `;
+    
+    window.print();
+    document.body.innerHTML = originalContents;
+    
+    // Переинициализация обработчиков событий после возврата содержимого
+    initReportHandlers();
+}
+
+// Функция генерации отчета
+function generateReport(event) {
+    // Предотвращаем отправку формы по умолчанию
+    if (event) {
+        event.preventDefault();
+    }
+    
+    console.log("Generating report...");
+    
+    const reportType = document.getElementById('reportType').value;
+    const entityOrTopic = document.getElementById('entityOrTopic').value.trim();
+    const period = document.getElementById('reportPeriod').value;
+    
+    if (!entityOrTopic) {
+        alert('Пожалуйста, введите название сущности или темы');
+        return;
+    }
+    
+    // Показать индикатор загрузки
+    document.getElementById('reportResults').innerHTML = `
+        <div class="d-flex justify-content-center">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Генерация отчета...</span>
+            </div>
+        </div>
+        <p class="text-center mt-2">Генерация отчета может занять до 3 минут...</p>
+    `;
+    
+    console.log("Sending report request:", {
+        type: reportType,
+        entity_or_topic: entityOrTopic,
+        period: period
+    });
+    
+    // Отправить запрос на генерацию отчета
+    fetch('/api/proxy/reports/generate', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            type: reportType,
+            entity_or_topic: entityOrTopic,
+            period: period
+        }),
+    })
+    .then(response => {
+        console.log("Got response:", response.status);
+        if (!response.ok) {
+            return response.json().then(err => Promise.reject(err));
+        }
+        return response.json();
+    })
+    .then(data => {
+        console.log("Report data:", data);
+        
+        if (data.report && data.report.generated_text) {
+            const report = data.report;
+            
+            // Очистка текста от возможных артефактов
+            let cleanText = report.generated_text.trim();
+            
+            // Проверка на артефакты JSON в начале текста
+            if (cleanText.startsWith('",') || cleanText.startsWith('"}') || 
+                cleanText.startsWith('"]:') || cleanText.startsWith('", "') ||
+                cleanText.startsWith('{"')) {
+                const firstLineBreak = cleanText.indexOf('\n');
+                if (firstLineBreak > 0) {
+                    cleanText = cleanText.substring(firstLineBreak + 1);
+                }
+            }
+            
+            // Проверка на артефакты JSON в конце текста
+            if (cleanText.endsWith('",') || cleanText.endsWith('"}') || 
+                cleanText.endsWith('":') || cleanText.endsWith('",') ||
+                cleanText.endsWith('"}]')) {
+                const lastLineBreak = cleanText.lastIndexOf('\n');
+                if (lastLineBreak > 0) {
+                    cleanText = cleanText.substring(0, lastLineBreak);
+                }
+            }
+            
+            // Форматирование текста отчета
+            let formattedText = cleanText
+                // Обработка заголовков и параграфов
+                .replace(/\n\n+/g, '</p><p>') 
+                .replace(/\n([A-ZА-Я0-9][^\.,:;\n]*?):\n/g, '</p><h4>$1</h4><p>') 
+                .replace(/\n([A-ZА-Я0-9][^\.,:;\n]*?)\n/g, '</p><h4>$1</h4><p>')
+                // Обработка списков
+                .replace(/\n(\d+\.\s+[^\n]+)/g, '</p><ul><li>$1</li></ul><p>')
+                .replace(/\n(\*\s+[^\n]+)/g, '</p><ul><li>$1</li></ul><p>')
+                .replace(/\n(-\s+[^\n]+)/g, '</p><ul><li>$1</li></ul><p>')
+                // Удаление повторяющихся открытий/закрытий тегов
+                .replace(/<\/p><p><\/p><p>/g, '</p><p>')
+                .replace(/<\/p><ul><\/ul><p>/g, '</p><p>')
+                .replace(/<\/ul><p><\/p><ul>/g, '</ul><ul>');
+                
+            // Оборачиваем текст в начальный и конечный параграфы, если нужно
+            if (!formattedText.startsWith('<p>')) {
+                formattedText = '<p>' + formattedText;
+            }
+            if (!formattedText.endsWith('</p>')) {
+                formattedText += '</p>';
+            }
+            
+            // Отображение отчета
+            let reportHtml = `
+                <div class="report-container">
+                    <div class="report-header mb-4">
+                        <h3>Отчет по ${reportType === 'entity' ? 'сущности' : 'теме'} "${report.entity_or_topic}"</h3>
+                        <div class="d-flex justify-content-between text-muted">
+                            <div>Период: ${getPeriodText(report.period)}</div>
+                            <div>Основано на ${report.news_count} новостях</div>
+                        </div>
+                    </div>
+                    
+                    <div class="report-content">
+                        ${formattedText}
+                    </div>
+                    
+                    <div class="report-footer mt-4 text-end">
+                        <small class="text-muted">Отчет сгенерирован: ${formatDate(report.generated_at)}</small>
+                        <button class="btn btn-sm btn-outline-primary ms-2" onclick="printReport()">
+                            <i class="bi bi-printer"></i> Печать
+                        </button>
+                    </div>
+                </div>
+            `;
+            
+            document.getElementById('reportResults').innerHTML = reportHtml;
+        } else {
+            // Ошибка в данных
+            document.getElementById('reportResults').innerHTML = `
+                <div class="alert alert-warning">
+                    <h5>Не удалось сгенерировать отчет</h5>
+                    <p>Данные не содержат текста отчета. Попробуйте снова или выберите другую тему/сущность.</p>
+                </div>
+            `;
+        }
+    })
+    .catch(error => {
+        console.error('Error generating report:', error);
+        
+        let errorMessage = error.error || 'Произошла неизвестная ошибка при генерации отчета';
+        if (error.error && error.error.includes('No news found')) {
+            document.getElementById('reportResults').innerHTML = `
+                <div class="alert alert-info">
+                    <h5>Нет данных для анализа</h5>
+                    <p>Не найдено новостей по ${reportType === 'entity' ? 'сущности' : 'теме'} "${entityOrTopic}" за выбранный период.</p>
+                    <p>Попробуйте изменить параметры запроса или выбрать другой временной период.</p>
+                </div>
+            `;
+        } else {
+            document.getElementById('reportResults').innerHTML = `
+                <div class="alert alert-danger">
+                    <h5>Ошибка при генерации отчета</h5>
+                    <p>${errorMessage}</p>
+                    ${error.raw_data ? `<pre class="mt-3 small">${JSON.stringify(error.raw_data, null, 2)}</pre>` : ''}
+                </div>
+            `;
+        }
+    });
+}
+
+// Инициализация обработчиков событий для формы отчета
+function initReportHandlers() {
+    console.log("Initializing report handlers");
+    const reportForm = document.getElementById('reportForm');
+    const reportType = document.getElementById('reportType');
+    
+    if (reportForm) {
+        reportForm.addEventListener('submit', function(e) {
+            console.log("Report form submitted");
+            e.preventDefault(); // Это критически важно
+            generateReport();
+        });
+    } else {
+        console.warn("Report form not found in DOM");
+    }
+    
+    if (reportType) {
+        reportType.addEventListener('change', updateSuggestionList);
+    }
+    
+    // Инициализируем список подсказок
+    updateSuggestionList();
+}
+
+// Инициализируем всё при загрузке DOM
+document.addEventListener('DOMContentLoaded', function() {
+    console.log("DOM loaded, initializing reports functionality");
+    
+    // Убедимся, что datalist элементы существуют
+    if (!document.getElementById('topicsList')) {
+        console.log("Creating topics datalist");
+        const topicsList = document.createElement('datalist');
+        topicsList.id = 'topicsList';
+        document.body.appendChild(topicsList);
+    }
+    
+    if (!document.getElementById('entitiesList')) {
+        console.log("Creating entities datalist");
+        const entitiesList = document.createElement('datalist');
+        entitiesList.id = 'entitiesList';
+        document.body.appendChild(entitiesList);
+    }
+    
+    // Загрузим данные для подсказок
+    loadEntitiesAndTopics();
+    
+    // Инициализируем обработчики
+    initReportHandlers();
+});
+
+// Экспортируем функции, которые могут быть вызваны извне
+window.generateReport = generateReport;
+window.printReport = printReport;
 </script>
 {% endblock %}
