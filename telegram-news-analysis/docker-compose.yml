@@ -3,10 +3,6 @@ services:
     image: postgres:15-alpine
     container_name: telegram_postgres
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 1G
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U telegram_news"]
       interval: 10s
@@ -23,36 +19,160 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - telegram_news_network
-
-  llm-service:
+  llm-light-1:
     build:
       context: ./src/llm
       dockerfile: Dockerfile
-    container_name: telegram-news-llm
+    container_name: telegram-news-llm-light-1
     environment:
-      - MODEL_PATH=/app/models/mistral-7b-instruct-q4_0.gguf
+      - MODEL_PATH=/app/models/openchat-3.5-1210.Q4_K_M.gguf
       - LLAMA_PORT=8080
       - MAX_RETRIES=3
       - RETRY_DELAY=5
-      - LLAMA_TIMEOUT=60
+      - LLAMA_TIMEOUT=200
+      - CONTEXT_SIZE=1024
+      - MODEL_TYPE=openchat
+      - N_BATCH=512
+      - N_THREADS=6
+      - ROPE_FREQ_BASE=10000
+      - MUL_MAT_Q=1
+      - USE_MLOCK=1
     volumes:
       - ./models:/app/models:ro
+    ports:
+      - "8002:8000"
+    deploy:
+      resources:
+        limits:
+          memory: 18G
+    restart: unless-stopped
+    networks:
+      - telegram_news_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+  llm-light-2:
+    build:
+      context: ./src/llm
+      dockerfile: Dockerfile
+    container_name: telegram-news-llm-light-2
+    environment:
+      - MODEL_PATH=/app/models/openchat-3.5-1210.Q4_K_M.gguf
+      - LLAMA_PORT=8080
+      - MAX_RETRIES=3
+      - RETRY_DELAY=5
+      - LLAMA_TIMEOUT=200
+      - CONTEXT_SIZE=1024
+      - MODEL_TYPE=openchat
+      - N_BATCH=512
+      - N_THREADS=6
+      - ROPE_FREQ_BASE=10000
+      - MUL_MAT_Q=1
+      - USE_MLOCK=1
+    volumes:
+      - ./models:/app/models:ro
+    ports:
+      - "8003:8000"
+    deploy:
+      resources:
+        limits:
+          memory: 18G
+    restart: unless-stopped
+    networks:
+      - telegram_news_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+  llm-light-3:
+    build:
+      context: ./src/llm
+      dockerfile: Dockerfile
+    container_name: telegram-news-llm-light-3
+    environment:
+      - MODEL_PATH=/app/models/openchat-3.5-1210.Q4_K_M.gguf
+      - LLAMA_PORT=8080
+      - MAX_RETRIES=3
+      - RETRY_DELAY=5
+      - LLAMA_TIMEOUT=200
+      - CONTEXT_SIZE=1024
+      - MODEL_TYPE=openchat
+      - N_BATCH=512
+      - N_THREADS=6
+      - ROPE_FREQ_BASE=10000
+      - MUL_MAT_Q=1
+      - USE_MLOCK=1
+    volumes:
+      - ./models:/app/models:ro
+    ports:
+      - "8004:8000"
+    deploy:
+      resources:
+        limits:
+          memory: 25G
+    restart: unless-stopped
+    networks:
+      - telegram_news_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  llm-heavy:
+    build:
+      context: ./src/llm
+      dockerfile: Dockerfile
+    container_name: telegram-news-llm-heavy
+    environment:
+      - MODEL_PATH=/app/models/solar-10.7b-instruct-v1.0.Q4_K_M.gguf
+      - LLAMA_PORT=8080
+      - MAX_RETRIES=3
+      - RETRY_DELAY=5
+      - LLAMA_TIMEOUT=600
+      - MAX_TOKENS_DEFAULT=4000
+      - CONTEXT_SIZE=6000
+      - MODEL_TYPE=solar
+      - IS_HEAVY=true
+      - N_BATCH=512
+      - N_THREADS=6
+      - ROPE_FREQ_BASE=10000
+      - MUL_MAT_Q=1
+      - USE_MLOCK=1
+    volumes:
+      - ./models:/app/models:ro
+      - ./tmp/llm:/tmp
     ports:
       - "8000:8000"
     deploy:
       resources:
         limits:
-          cpus: '6'
-          memory: 10G
+          memory: 50G
     restart: unless-stopped
     networks:
       - telegram_news_network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
-      timeout: 10s
-      retries: 5
+      timeout: 15s
+      retries: 3
       start_period: 180s
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "200m"
+        max-file: "3"
+
 
 
   kafka:
@@ -70,10 +190,6 @@ services:
       KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
       KAFKA_CFG_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
       KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
-    deploy:
-      resources:
-        limits:
-          memory: 2G
     healthcheck:
       test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9092'"]
       interval: 1s
@@ -181,8 +297,8 @@ services:
       - JAVA_HOME=/opt/bitnami/java 
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_MEMORY=8g
-      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=10g
+      - SPARK_WORKER_CORES=4
       - SPARK_RPC_AUTHENTICATION_ENABLED=no
       - SPARK_RPC_ENCRYPTION_ENABLED=no
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
@@ -211,13 +327,26 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
-      llm-service:
+      llm-light-1:
+        condition: service_healthy
+      llm-light-2:
+        condition: service_healthy
+      llm-light-3:
+        condition: service_healthy
+      llm-heavy:
         condition: service_healthy
     environment:
       - SPARK_MASTER=spark://spark-master:7077
       - KAFKA_BROKERS=kafka:9092
       - CONNECTION_TIMEOUT=120
       - POSTGRES_URI=postgresql://telegram_news:telegram_password@postgres:5432/telegram_news
+      - LLM_SENTIMENT_URL=http://llm-light-1:8000/generate
+      - LLM_TOPICS_URL=http://llm-light-2:8000/generate
+      - LLM_ENTITY_URL=http://llm-light-3:8000/generate
+      - USE_LIGHTWEIGHT_LLM=true
+      - USE_HEAVYWEIGHT_LLM=false
+      - SPARK_DRIVER_MEMORY=6g
+      - SPARK_EXECUTOR_MEMORY8g
     env_file:
       - .env
     networks:

@@ -3,665 +3,1087 @@
 {% block title %}Тренды | Анализ новостей в Telegram{% endblock %}
 
 {% block content %}
-<div class="container mt-4">
-    <div class="row">
-        <div class="col-md-12">
-            <div class="card">
-                <div class="card-body">
-                    <h2 class="card-title">Тренды и аналитика</h2>
-                    
-                    <div class="mb-4">
-                        <form id="trendForm" class="row g-3">
-                            <div class="col-md-10">
-                                <select class="form-select" id="periodSelect">
-                                    <option value="24h">За 24 часа</option>
-                                    <option value="7d">За 7 дней</option>
-                                    <option value="1h">За 1 час</option>
-                                </select>
-                            </div>
-                            <div class="col-md-2">
-                                <button type="submit" class="btn btn-primary w-100">Обновить</button>
-                            </div>
-                        </form>
-                    </div>
-                    
-                    <div id="trendsResults">
-                        <div class="spinner-container">
-                            <div class="spinner-border text-primary" role="status">
-                                <span class="visually-hidden">Загрузка...</span>
-                            </div>
+<div class="container trends-container">
+    <h1 class="page-title">Тренды и аналитика</h1>
+    
+    <div class="time-range-selector">
+        <button type="button" class="btn btn-outline-primary time-range-btn active" data-range="24h">24 часа</button>
+        <button type="button" class="btn btn-outline-primary time-range-btn" data-range="7d">7 дней</button>
+        <button type="button" class="btn btn-outline-primary time-range-btn" data-range="30d">30 дней</button>
+    </div>
+    
+    <div class="time-range-info">
+        <h2 id="trendsTimeRangeTitle" class="h3 mb-2">За 24 часа</h2>
+        <p id="trendsSubtitle" class="text-muted mb-4">Результаты за последние 24 часа</p>
+    </div>
+    
+    <div class="trends-grid">
+        <div class="trend-card">
+            <div class="card-header">
+                <h3>Популярные темы</h3>
+            </div>
+            <div class="card-body">
+                <div id="topicsContainer" class="trend-list">
+                    <div class="text-center py-3 loading-indicator">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Загрузка...</span>
                         </div>
                     </div>
                 </div>
             </div>
         </div>
-    </div>
-</div>
-
-<div class="container mt-4">
-    <div class="row">
-        <div class="col-md-6">
-            <div class="card">
-                <div class="card-body">
-                    <h5 class="card-title">Популярные темы</h5>
-                    <canvas id="topicsChart"></canvas>
+        
+        <div class="trend-card">
+            <div class="card-header">
+                <h3>Популярные сущности</h3>
+            </div>
+            <div class="card-body">
+                <div id="entitiesContainer" class="trend-list">
+                    <div class="text-center py-3 loading-indicator">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Загрузка...</span>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
         
-        <div class="col-md-6">
-            <div class="card">
-                <div class="card-body">
-                    <h5 class="card-title">Распределение тональности</h5>
-                    <canvas id="sentimentChart"></canvas>
+        <div class="trend-card">
+            <div class="card-header">
+                <h3>Распределение тональности</h3>
+            </div>
+            <div class="card-body">
+                <div id="sentimentsContainer">
+                    <div class="text-center py-3 loading-indicator">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Загрузка...</span>
+                        </div>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="sentimentChart"></canvas>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
-</div>
-<!-- Добавьте эту секцию после существующих карточек -->
-<!-- Датасписки для автозаполнения -->
-<datalist id="topicsList"></datalist>
-<datalist id="entitiesList"></datalist>
+    
+    <div class="report-section">
+        <div class="card-header">
+            <h3>Аналитические отчеты</h3>
+        </div>
+        
+        <form id="reportForm" class="report-form my-4">
+            <div class="form-group">
+                <label for="reportType">Тип отчета</label>
+                <select class="form-control" id="reportType">
+                    <option value="entity" selected>По сущности</option>
+                    <option value="topic">По теме</option>
+                </select>
+            </div>
+            
+            <div class="form-group" id="entityBlock">
+                <label for="entitySelect">Выберите сущность</label>
+                <select class="form-control" id="entitySelect">
+                    <option value="">Загрузка сущностей...</option>
+                </select>
+            </div>
+            
+            <div class="form-group d-none" id="topicBlock">
+                <label for="topicSelect">Выберите тему</label>
+                <select class="form-control" id="topicSelect">
+                    <option value="">Загрузка тем...</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label for="periodSelect">Период</label>
+                <select class="form-control" id="periodSelect">
+                    <option value="1d">1 день</option>
+                    <option value="3d">3 дня</option>
+                    <option value="7d" selected>7 дней</option>
+                    <option value="14d">14 дней</option>
+                    <option value="30d">30 дней</option>
+                </select>
+            </div>
+            
+            <div class="form-group d-flex align-items-end">
+                <button type="submit" class="btn btn-primary" id="generateReportBtn">
+                    <span class="btn-text">Сгенерировать</span>
+                    <span class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
+                </button>
+            </div>
+        </form>
+        
+        <div class="text-muted mb-3">
+            Выберите сущность или тему и нажмите "Сгенерировать" для создания аналитического отчета.
+        </div>
+    </div>
 
-<!-- Форма отчетов -->
-<div class="container mt-4">
-    <div class="row">
-        <div class="col-md-12">
-            <div class="card">
-                <div class="card-body">
-                    <h2 class="card-title">Аналитические отчеты</h2>
-                    
-                    <div class="mb-4">
-                        <form id="reportForm" class="row g-3">
-                            <div class="col-md-3">
-                                <select class="form-select" id="reportType">
-                                    <option value="entity">По сущности</option>
-                                    <option value="topic">По теме</option>
-                                </select>
-                            </div>
-                            <div class="col-md-5">
-                                <input type="text" class="form-control" id="entityOrTopic" list="entitiesList" placeholder="Введите название сущности">
-                            </div>
-                            <div class="col-md-2">
-                                <select class="form-select" id="reportPeriod">
-                                    <option value="7d">7 дней</option>
-                                    <option value="1d">1 день</option>
-                                    <option value="30d">30 дней</option>
-                                    <option value="90d">90 дней</option>
-                                </select>
-                            </div>
-                            <div class="col-md-2">
-                                <button type="submit" class="btn btn-primary w-100">Сгенерировать</button>
-                            </div>
-                        </form>
-                    </div>
-                    
-                    <div id="reportResults" class="mt-4">
-                        <p class="text-muted text-center">Введите название сущности или темы и нажмите "Сгенерировать" для создания аналитического отчета.</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
+    <div id="reportContainer"></div>
 </div>
 {% endblock %}
+
 {% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.1/dist/chart.min.js"></script>
 <script>
-    let topicsChart = null;
-    let sentimentChart = null;
-function loadTrends() {
-    const period = document.getElementById('periodSelect').value;
+class TrendsDashboard {
+    constructor() {
+        this.timeRanges = ["24h", "7d", "30d"];
+        this.currentRange = "24h";
+        this.trendsData = {};
+        this.sentimentChart = null;
+        
+        this.init();
+    }
+
+    async init() {
+        this.loadData();
+        this.setupEventListeners();
+        
+        // Это функция из основного JS файла для очистки сообщений "Загрузка"
+        if (typeof window.cleanupLoadingMessages === 'function') {
+            setTimeout(window.cleanupLoadingMessages, 2000);
+        }
+        
+        // Также вызываем функцию скрытия текстов загрузки
+        this.hideLoadingTexts();
+    }
     
-    document.getElementById('trendsResults').innerHTML = `
-        <div class="spinner-container">
-            <div class="spinner-border text-primary" role="status">
-                <span class="visually-hidden">Загрузка...</span>
+    // Функция скрытия текстов "Загрузка" в заголовках
+    hideLoadingTexts() {
+        document.querySelectorAll('h3, h4, h5').forEach(heading => {
+            if (heading.textContent.includes('Загрузка')) {
+                heading.classList.add('loading-hidden');
+                // Создаем новый заголовок без "Загрузка"
+                const cleanText = heading.textContent.replace(/\s*Загрузка\.+\s*/, '');
+                heading.textContent = cleanText;
+            }
+        });
+    }
+
+    async loadData() {
+        try {
+            // Параллельная загрузка данных для всех временных диапазонов
+            const requests = this.timeRanges.map(range => 
+                fetch(`/api/proxy/trends?period=${range}`).then(r => r.json())
+            );
+            
+            const results = await Promise.all(requests);
+            this.timeRanges.forEach((range, i) => {
+                this.trendsData[range] = results[i];
+            });
+            
+            this.renderTrends();
+            
+            // Скрываем все индикаторы загрузки после рендеринга
+            document.querySelectorAll('.loading-indicator').forEach(el => {
+                el.style.display = 'none';
+            });
+            
+            // Очищаем заголовки от "Загрузка"
+            this.hideLoadingTexts();
+        } catch (error) {
+            console.error("Ошибка загрузки данных:", error);
+            this.showError("Ошибка загрузки данных. Пожалуйста, обновите страницу.");
+        }
+    }
+
+    setupEventListeners() {
+        // Переключение временных диапазонов
+        document.querySelectorAll(".time-range-btn").forEach(btn => {
+            btn.addEventListener("click", () => {
+                this.currentRange = btn.dataset.range;
+                document.querySelectorAll(".time-range-btn").forEach(b => 
+                    b.classList.remove("active")
+                );
+                btn.classList.add("active");
+                this.updateRangeTitle();
+                this.renderTrends();
+            });
+        });
+        
+        // Переключение типа отчета
+        const reportType = document.getElementById("reportType");
+        if (reportType) {
+            reportType.addEventListener("change", (e) => {
+                const isEntity = e.target.value === 'entity';
+                const entityBlock = document.getElementById("entityBlock");
+                const topicBlock = document.getElementById("topicBlock");
+                
+                if (entityBlock) entityBlock.classList.toggle("d-none", !isEntity);
+                if (topicBlock) topicBlock.classList.toggle("d-none", isEntity);
+            });
+        }
+        
+        // Отправка формы отчета
+        const reportForm = document.getElementById("reportForm");
+        if (reportForm) {
+            reportForm.addEventListener("submit", (e) => {
+                e.preventDefault();
+                this.generateReport();
+            });
+        }
+    }
+
+    updateRangeTitle() {
+        const titles = {
+            '24h': ['За 24 часа', 'Результаты за последние 24 часа'],
+            '7d': ['За 7 дней', 'Результаты за последние 7 дней'],
+            '30d': ['За 30 дней', 'Результаты за последние 30 дней']
+        };
+        
+        const [title, subtitle] = titles[this.currentRange] || titles['24h'];
+        const titleEl = document.getElementById("trendsTimeRangeTitle");
+        const subtitleEl = document.getElementById("trendsSubtitle");
+        
+        if (titleEl) titleEl.textContent = title;
+        if (subtitleEl) subtitleEl.textContent = subtitle;
+    }
+
+    renderTrends() {
+        const data = this.trendsData[this.currentRange];
+        if (!data) return;
+        
+        this.renderTopics(data.trends?.topics || []);
+        this.renderEntities(data.trends?.entities || []);
+        this.renderSentiments(data.trends?.sentiments || []);
+    }
+
+    renderTopics(topics) {
+        const container = document.getElementById("topicsContainer");
+        if (!container) return;
+        
+        if (!topics.length) {
+            container.innerHTML = '<div class="no-data">Нет данных о популярных темах</div>';
+            return;
+        }
+        
+        container.innerHTML = topics.map(topic => `
+            <div class="trend-item">
+                <a href="javascript:void(0)" class="trend-link" onclick="window.searchTopic('${this.escapeHtml(topic.topic || topic.label)}')">
+                    ${this.escapeHtml(topic.topic || topic.label)}
+                </a>
+                <span class="trend-count">${topic.count}</span>
             </div>
-        </div>`;
-    
-    fetch(`/api/proxy/trends?period=${period}`)
-        .then(response => {
+        `).join('');
+    }
+
+    renderEntities(entities) {
+        const container = document.getElementById("entitiesContainer");
+        if (!container) return;
+        
+        if (!entities.length) {
+            container.innerHTML = '<div class="no-data">Нет данных о популярных сущностях</div>';
+            return;
+        }
+        
+        container.innerHTML = entities.map(entity => `
+            <div class="trend-item">
+                <a href="javascript:void(0)" class="trend-link" onclick="window.searchEntity('${this.escapeHtml(entity.entity || entity.name)}')">
+                    ${this.escapeHtml(entity.entity || entity.name)}
+                </a>
+                <span class="trend-count">${entity.count}</span>
+            </div>
+        `).join('');
+    }
+
+    renderSentiments(sentiments) {
+        const container = document.getElementById("sentimentsContainer");
+        if (!container) return;
+        
+        // Скрываем индикатор загрузки
+        const loadingIndicator = container.querySelector('.loading-indicator');
+        if (loadingIndicator) {
+            loadingIndicator.style.display = 'none';
+        }
+        
+        if (!sentiments.length) {
+            container.innerHTML = '<div class="no-data">Нет данных о распределении тональности</div>';
+            return;
+        }
+        
+        // Формируем данные для графика
+        const sentimentData = {};
+        sentiments.forEach(s => {
+            const key = (s.sentiment || s.label || 'neutral').toLowerCase();
+            sentimentData[key] = (sentimentData[key] || 0) + (s.count || 1);
+        });
+        
+        // Создаем/обновляем график
+        this.createSentimentChart(sentimentData);
+    }
+
+    createSentimentChart(data) {
+        const canvas = document.getElementById("sentimentChart");
+        if (!canvas) return;
+        
+        const ctx = canvas.getContext('2d');
+        
+        // Удаляем предыдущий график, если он есть
+        if (this.sentimentChart) {
+            this.sentimentChart.destroy();
+        }
+        
+        const colors = {
+            'positive': '#28a745',
+            'negative': '#dc3545',
+            'neutral': '#6c757d'
+        };
+        
+        const labels = [];
+        const chartData = [];
+        const backgroundColors = [];
+        
+        Object.entries(data).forEach(([key, value]) => {
+            const label = {
+                'positive': 'Позитивно',
+                'negative': 'Негативно',
+                'neutral': 'Нейтрально'
+            }[key] || key;
+            
+            labels.push(label);
+            chartData.push(value);
+            backgroundColors.push(colors[key] || '#6c757d');
+        });
+        
+        this.sentimentChart = new Chart(ctx, {
+            type: 'pie',
+            data: {
+                labels: labels,
+                datasets: [{
+                    data: chartData,
+                    backgroundColor: backgroundColors,
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    legend: {
+                        position: 'right',
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                const label = context.label;
+                                const value = context.raw;
+                                const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                const percentage = Math.round((value / total) * 100);
+                                return `${label}: ${value} (${percentage}%)`;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        
+        // Исправленная версия поиска и очистки заголовков с текстом "Загрузка"
+        this.hideLoadingTexts();
+    }
+
+    async generateReport() {
+        const form = document.getElementById("reportForm");
+        const reportTypeSelect = document.getElementById("reportType");
+        if (!reportTypeSelect) return;
+        
+        const reportType = reportTypeSelect.value;
+        const selectId = reportType === 'entity' ? 'entitySelect' : 'topicSelect';
+        const selectElement = document.getElementById(selectId);
+        if (!selectElement) return;
+        
+        const query = selectElement.value;
+        const periodSelect = document.getElementById("periodSelect");
+        const period = periodSelect ? periodSelect.value : "7d";
+        const btn = document.getElementById("generateReportBtn");
+        if (!btn) return;
+        
+        if (!query) {
+            this.showError(`Пожалуйста, выберите ${reportType === 'entity' ? 'сущность' : 'тему'}`);
+            return;
+        }
+        
+        // Показываем индикатор загрузки
+        btn.disabled = true;
+        const btnText = btn.querySelector('.btn-text');
+        const spinner = btn.querySelector('.spinner-border');
+        
+        if (btnText) btnText.classList.add('d-none');
+        if (spinner) spinner.classList.remove('d-none');
+        
+        try {
+            const response = await fetch("/api/proxy/reports/generate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    type: reportType,
+                    entity_or_topic: query,
+                    period: period
+                })
+            });
+            
             if (!response.ok) {
-                throw new Error('Network response was not ok');
+                throw new Error(`HTTP error! status: ${response.status}`);
             }
-            return response.json();
-        })
-        .then(data => {
-            console.log("Trends data:", data); // Отладочный вывод
-
-            const trends = data.trends || {};
             
-            // Отображение результатов
-            let trendsHtml = `<h4>Результаты за ${
-                period === '24h' ? 'последние 24 часа' : 
-                period === '7d' ? 'последнюю неделю' : 
-                'последний час'
-            }</h4>`;
+            const data = await response.json();
             
-            // Популярные темы
-            trendsHtml += '<div class="card mb-3"><div class="card-body">';
-            trendsHtml += '<h5 class="card-title">Популярные темы</h5>';
-            
-            if (trends.topics && trends.topics.length > 0) {
-                trendsHtml += '<ul class="list-group">';
-                for (const topic of trends.topics.slice(0, 10)) {
-                    trendsHtml += `
-                        <li class="list-group-item d-flex justify-content-between align-items-center">
-                            ${topic.topic}
-                            <span class="badge bg-primary rounded-pill">${topic.count}</span>
-                        </li>`;
-                }
-                trendsHtml += '</ul>';
+            if (data.report && data.report.generated_text) {
+                this.displayReport(data.report.generated_text, query, period);
+            } else if (data.report_text) {
+                this.displayReport(data.report_text, query, period);
+            } else if (data.request_id) {
+                this.monitorReportStatus(data.request_id, query, period);
             } else {
-                trendsHtml += '<p class="text-muted">Нет данных о популярных темах</p>';
+                throw new Error("Неверный формат ответа от сервера");
             }
-            
-            trendsHtml += '</div></div>';
-            
-            // Популярные сущности
-            trendsHtml += '<div class="card mb-3"><div class="card-body">';
-            trendsHtml += '<h5 class="card-title">Популярные сущности</h5>';
-            
-            if (trends.entities && trends.entities.length > 0) {
-                trendsHtml += '<ul class="list-group">';
-                for (const entity of trends.entities.slice(0, 10)) {
-                    trendsHtml += `
-                        <li class="list-group-item d-flex justify-content-between align-items-center">
-                            ${entity.entity}
-                            <span class="badge bg-info rounded-pill">${entity.count}</span>
-                        </li>`;
-                }
-                trendsHtml += '</ul>';
-            } else {
-                trendsHtml += '<p class="text-muted">Нет данных о популярных сущностях</p>';
-            }
-            
-            trendsHtml += '</div></div>';
-            
-            // Тональность
-            trendsHtml += '<div class="card mb-3"><div class="card-body">';
-            trendsHtml += '<h5 class="card-title">Распределение тональности</h5>';
-            
-            if (trends.sentiments && trends.sentiments.length > 0) {
-                trendsHtml += '<ul class="list-group">';
-                for (const sentiment of trends.sentiments) {
-                    let badgeClass = '';
-                    let sentimentText = '';
-                    
-                    switch(sentiment.sentiment) {
-                        case 'positive':
-                            badgeClass = 'bg-success';
-                            sentimentText = 'Позитивно';
-                            break;
-                        case 'negative':
-                            badgeClass = 'bg-danger';
-                            sentimentText = 'Негативно';
-                            break;
-                        default:
-                            badgeClass = 'bg-secondary';
-                            sentimentText = 'Нейтрально';
-                    }
-                    
-                    trendsHtml += `
-                        <li class="list-group-item d-flex justify-content-between align-items-center">
-                            ${sentimentText}
-                            <span class="badge ${badgeClass} rounded-pill">${sentiment.count}</span>
-                        </li>`;
-                }
-                trendsHtml += '</ul>';
-            } else {
-                trendsHtml += '<p class="text-muted">Нет данных о тональности</p>';
-            }
-            
-            trendsHtml += '</div></div>';
-            
-            document.getElementById('trendsResults').innerHTML = trendsHtml;
-            
-            // Создание графиков
-            createCharts(trends);
-        })
-        .catch(error => {
-            console.error('Error loading trends:', error);
-            document.getElementById('trendsResults').innerHTML = `
-                <div class="alert alert-danger">
-                    Произошла ошибка при загрузке трендов. Пожалуйста, попробуйте позже.
-                </div>`;
-        });
-} 
-    // Функция для создания графиков
-    function createCharts(trends) {
-        // График тем
-        if (trends.topics && trends.topics.length > 0) {
-            const topTopics = trends.topics.slice(0, 7);
-            const ctx = document.getElementById('topicsChart').getContext('2d');
-            
-            if (topicsChart) {
-                topicsChart.destroy();
-            }
-            
-            topicsChart = new Chart(ctx, {
-                type: 'bar',
-                data: {
-                    labels: topTopics.map(t => t.topic),
-                    datasets: [{
-                        label: 'Количество упоминаний',
-                        data: topTopics.map(t => t.count),
-                        backgroundColor: 'rgba(54, 162, 235, 0.6)',
-                        borderColor: 'rgba(54, 162, 235, 1)',
-                        borderWidth: 1
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    scales: {
-                        y: {
-                            beginAtZero: true
-                        }
-                    }
-                }
-            });
+        } catch (error) {
+            console.error("Ошибка генерации отчета:", error);
+            this.showError(`Не удалось сгенерировать отчет: ${error.message}`);
+        } finally {
+            btn.disabled = false;
+            if (btnText) btnText.classList.remove('d-none');
+            if (spinner) spinner.classList.add('d-none');
         }
+    }
+
+    displayReport(reportText, query, period) {
+        const container = document.getElementById("reportContainer");
+        if (!container) return;
         
-        // График тональности
-        if (trends.sentiments && trends.sentiments.length > 0) {
-            const ctx = document.getElementById('sentimentChart').getContext('2d');
-            
-            if (sentimentChart) {
-                sentimentChart.destroy();
-            }
-            
-            // Преобразование меток тональности для отображения
-            const labels = trends.sentiments.map(s => {
-                switch(s.sentiment) {
-                    case 'positive': return 'Позитивно';
-                    case 'negative': return 'Негативно';
-                    default: return 'Нейтрально';
-                }
-            });
-            
-            // Создание соответствующих цветов
-            const backgroundColors = trends.sentiments.map(s => {
-                switch(s.sentiment) {
-                    case 'positive': return 'rgba(40, 167, 69, 0.6)';
-                    case 'negative': return 'rgba(220, 53, 69, 0.6)';
-                    default: return 'rgba(108, 117, 125, 0.6)';
-                }
-            });
-            
-            sentimentChart = new Chart(ctx, {
-                type: 'pie',
-                data: {
-                    labels: labels,
-                    datasets: [{
-                        data: trends.sentiments.map(s => s.count),
-                        backgroundColor: backgroundColors,
-                        borderWidth: 1
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    plugins: {
-                        legend: {
-                            position: 'top',
-                        },
-                        title: {
-                            display: true,
-                            text: 'Распределение тональности'
-                        }
-                    }
-                }
-            });
-        } else {
-            // Очистка графика, если нет данных
-            const ctx = document.getElementById('sentimentChart').getContext('2d');
-            if (sentimentChart) {
-                sentimentChart.destroy();
-            }
-            ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-            ctx.font = '14px Arial';
-            ctx.textAlign = 'center';
-            ctx.fillText('Нет данных о тональности', ctx.canvas.width/2, ctx.canvas.height/2);
-        }
-    }
-    
-    // Обработчики событий
-    document.addEventListener('DOMContentLoaded', function() {
-        // Проверяем наличие Chart.js
-        if (typeof Chart === 'undefined') {
-            console.error('Chart.js not loaded. Please include Chart.js library.');
-            // Добавляем Chart.js если он отсутствует
-            const script = document.createElement('script');
-            script.src = 'https://cdn.jsdelivr.net/npm/chart.js';
-            script.onload = function() {
-                loadTrends();
-            };
-            document.head.appendChild(script);
-        } else {
-            loadTrends();
-        }
+        const periodText = {
+            '1d': '1 день',
+            '3d': '3 дня',
+            '7d': '7 дней',
+            '14d': '14 дней',
+            '30d': '30 дней'
+        }[period] || period;
         
-        document.getElementById('trendForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            loadTrends();
-        });
-    });
-    // Добавьте в уже существующий скрипт:
-
-// Функция генерации отчета
-// Функция для загрузки доступных тем и сущностей
-function loadEntitiesAndTopics() {
-    fetch('/api/proxy/trends?period=30d')
-        .then(response => response.json())
-        .then(data => {
-            console.log("Loaded trends for suggestions:", data);
-            if (data.trends) {
-                // Заполняем датасписки для автозаполнения
-                const topicsList = document.getElementById('topicsList');
-                const entitiesList = document.getElementById('entitiesList');
-                
-                if (topicsList && entitiesList) {
-                    // Очищаем существующие опции
-                    topicsList.innerHTML = '';
-                    entitiesList.innerHTML = '';
-                    
-                    // Добавляем темы
-                    if (data.trends.topics && data.trends.topics.length > 0) {
-                        data.trends.topics.forEach(topic => {
-                            const option = document.createElement('option');
-                            option.value = topic.topic;
-                            topicsList.appendChild(option);
-                        });
-                    }
-                    
-                    // Добавляем сущности
-                    if (data.trends.entities && data.trends.entities.length > 0) {
-                        data.trends.entities.forEach(entity => {
-                            const option = document.createElement('option');
-                            option.value = entity.entity;
-                            entitiesList.appendChild(option);
-                        });
-                    }
-                } else {
-                    console.warn("Datalists not found in the DOM");
-                }
-            }
-        })
-        .catch(error => {
-            console.error('Error loading entities and topics:', error);
-        });
-}
-
-// Функция для обновления списка подсказок в зависимости от выбранного типа
-function updateSuggestionList() {
-    const reportType = document.getElementById('reportType');
-    const entityOrTopicInput = document.getElementById('entityOrTopic');
-    
-    if (!reportType || !entityOrTopicInput) {
-        console.warn("Elements not found for suggestion list update");
-        return;
-    }
-    
-    if (reportType.value === 'entity') {
-        entityOrTopicInput.setAttribute('list', 'entitiesList');
-        entityOrTopicInput.placeholder = 'Введите название сущности';
-    } else {
-        entityOrTopicInput.setAttribute('list', 'topicsList');
-        entityOrTopicInput.placeholder = 'Введите название темы';
-    }
-}
-
-// Функция для получения текстового представления периода
-function getPeriodText(period) {
-    switch(period) {
-        case '1d': return 'последние 24 часа';
-        case '7d': return 'последняя неделя';
-        case '30d': return 'последний месяц';
-        case '90d': return 'последние 3 месяца';
-        default: return period;
-    }
-}
-
-// Функция для форматирования даты
-function formatDate(dateString) {
-    const date = new Date(dateString);
-    return date.toLocaleString('ru-RU');
-}
-
-// Функция для печати отчета
-function printReport() {
-    const printContents = document.querySelector('.report-container').innerHTML;
-    const originalContents = document.body.innerHTML;
-    
-    document.body.innerHTML = `
-        <div class="container mt-4">
-            ${printContents}
-        </div>
-    `;
-    
-    window.print();
-    document.body.innerHTML = originalContents;
-    
-    // Переинициализация обработчиков событий после возврата содержимого
-    initReportHandlers();
-}
-
-// Функция генерации отчета
-function generateReport(event) {
-    // Предотвращаем отправку формы по умолчанию
-    if (event) {
-        event.preventDefault();
-    }
-    
-    console.log("Generating report...");
-    
-    const reportType = document.getElementById('reportType').value;
-    const entityOrTopic = document.getElementById('entityOrTopic').value.trim();
-    const period = document.getElementById('reportPeriod').value;
-    
-    if (!entityOrTopic) {
-        alert('Пожалуйста, введите название сущности или темы');
-        return;
-    }
-    
-    // Показать индикатор загрузки
-    document.getElementById('reportResults').innerHTML = `
-        <div class="d-flex justify-content-center">
-            <div class="spinner-border text-primary" role="status">
-                <span class="visually-hidden">Генерация отчета...</span>
-            </div>
-        </div>
-        <p class="text-center mt-2">Генерация отчета может занять до 3 минут...</p>
-    `;
-    
-    console.log("Sending report request:", {
-        type: reportType,
-        entity_or_topic: entityOrTopic,
-        period: period
-    });
-    
-    // Отправить запрос на генерацию отчета
-    fetch('/api/proxy/reports/generate', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            type: reportType,
-            entity_or_topic: entityOrTopic,
-            period: period
-        }),
-    })
-    .then(response => {
-        console.log("Got response:", response.status);
-        if (!response.ok) {
-            return response.json().then(err => Promise.reject(err));
-        }
-        return response.json();
-    })
-    .then(data => {
-        console.log("Report data:", data);
-        
-        if (data.report && data.report.generated_text) {
-            const report = data.report;
-            
-            // Очистка текста от возможных артефактов
-            let cleanText = report.generated_text.trim();
-            
-            // Проверка на артефакты JSON в начале текста
-            if (cleanText.startsWith('",') || cleanText.startsWith('"}') || 
-                cleanText.startsWith('"]:') || cleanText.startsWith('", "') ||
-                cleanText.startsWith('{"')) {
-                const firstLineBreak = cleanText.indexOf('\n');
-                if (firstLineBreak > 0) {
-                    cleanText = cleanText.substring(firstLineBreak + 1);
-                }
-            }
-            
-            // Проверка на артефакты JSON в конце текста
-            if (cleanText.endsWith('",') || cleanText.endsWith('"}') || 
-                cleanText.endsWith('":') || cleanText.endsWith('",') ||
-                cleanText.endsWith('"}]')) {
-                const lastLineBreak = cleanText.lastIndexOf('\n');
-                if (lastLineBreak > 0) {
-                    cleanText = cleanText.substring(0, lastLineBreak);
-                }
-            }
-            
-            // Форматирование текста отчета
-            let formattedText = cleanText
-                // Обработка заголовков и параграфов
-                .replace(/\n\n+/g, '</p><p>') 
-                .replace(/\n([A-ZА-Я0-9][^\.,:;\n]*?):\n/g, '</p><h4>$1</h4><p>') 
-                .replace(/\n([A-ZА-Я0-9][^\.,:;\n]*?)\n/g, '</p><h4>$1</h4><p>')
-                // Обработка списков
-                .replace(/\n(\d+\.\s+[^\n]+)/g, '</p><ul><li>$1</li></ul><p>')
-                .replace(/\n(\*\s+[^\n]+)/g, '</p><ul><li>$1</li></ul><p>')
-                .replace(/\n(-\s+[^\n]+)/g, '</p><ul><li>$1</li></ul><p>')
-                // Удаление повторяющихся открытий/закрытий тегов
-                .replace(/<\/p><p><\/p><p>/g, '</p><p>')
-                .replace(/<\/p><ul><\/ul><p>/g, '</p><p>')
-                .replace(/<\/ul><p><\/p><ul>/g, '</ul><ul>');
-                
-            // Оборачиваем текст в начальный и конечный параграфы, если нужно
-            if (!formattedText.startsWith('<p>')) {
-                formattedText = '<p>' + formattedText;
-            }
-            if (!formattedText.endsWith('</p>')) {
-                formattedText += '</p>';
-            }
-            
-            // Отображение отчета
-            let reportHtml = `
-                <div class="report-container">
-                    <div class="report-header mb-4">
-                        <h3>Отчет по ${reportType === 'entity' ? 'сущности' : 'теме'} "${report.entity_or_topic}"</h3>
-                        <div class="d-flex justify-content-between text-muted">
-                            <div>Период: ${getPeriodText(report.period)}</div>
-                            <div>Основано на ${report.news_count} новостях</div>
-                        </div>
-                    </div>
-                    
-                    <div class="report-content">
-                        ${formattedText}
-                    </div>
-                    
-                    <div class="report-footer mt-4 text-end">
-                        <small class="text-muted">Отчет сгенерирован: ${formatDate(report.generated_at)}</small>
-                        <button class="btn btn-sm btn-outline-primary ms-2" onclick="printReport()">
-                            <i class="bi bi-printer"></i> Печать
+        container.innerHTML = `
+            <div class="report-card mb-4">
+                <div class="report-header">
+                    <h4>Аналитический отчет: ${this.escapeHtml(query)}</h4>
+                    <div class="report-actions">
+                        <button class="btn btn-sm btn-outline-primary" onclick="copyReportToClipboard(this)">
+                            Копировать
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" onclick="toggleReportFullscreen(this)">
+                            Развернуть
                         </button>
                     </div>
                 </div>
+                <div class="report-meta">
+                    <span>Период: ${periodText}</span>
+                    <span>Дата: ${new Date().toLocaleDateString()}</span>
+                </div>
+                <div class="report-content">
+                    ${this.formatMarkdown(reportText)}
+                </div>
+                <div class="card-footer text-muted">
+                    <small>Отчет сгенерирован: ${new Date().toLocaleString()}</small>
+                </div>
+            </div>
+        `;
+
+        this.setupReportSections();
+        
+        // Прокручиваем к отчету
+        container.scrollIntoView({behavior: 'smooth'});
+    }
+
+    formatMarkdown(text) {
+        if (!text) return '';
+        
+        return text
+            .replace(/^### (.*$)/gim, '<h3>$1</h3>')
+            .replace(/^## (.*$)/gim, '<h2>$1</h2>')
+            .replace(/^# (.*$)/gim, '<h1>$1</h1>')
+            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+            .replace(/\*(.*?)\*/g, '<em>$1</em>')
+            .replace(/`([^`]+)`/g, '<code>$1</code>')
+            .replace(/```([^`]*?)```/gs, '<pre><code>$1</code></pre>')
+            .replace(/\n/g, '<br>');
+    }
+
+    setupReportSections() {
+        document.querySelectorAll('.report-content h3').forEach(header => {
+            const sectionId = `section-${Math.random().toString(36).substr(2, 9)}`;
+            const content = this.getSectionContent(header);
+            
+            if (!content) return;
+            
+            header.innerHTML = `
+                <button class="section-toggle" onclick="toggleSection('${sectionId}')">
+                    ${header.textContent}
+                    <i class="toggle-icon"></i>
+                </button>
             `;
             
-            document.getElementById('reportResults').innerHTML = reportHtml;
+            content.id = sectionId;
+            content.classList.add('collapsible-section');
+        });
+    }
+    
+    createNewsItemHtml(item) {
+  try {
+    let dateStr = "Не указана";
+    
+    if (item.date) {
+      if (typeof item.date === "number") {
+        dateStr = new Date(item.date).toLocaleString("ru-RU");
+      } else if (typeof item.date === "string") {
+        if (item.date.includes('T')) {
+          dateStr = new Date(item.date).toLocaleString("ru-RU");
         } else {
-            // Ошибка в данных
-            document.getElementById('reportResults').innerHTML = `
-                <div class="alert alert-warning">
-                    <h5>Не удалось сгенерировать отчет</h5>
-                    <p>Данные не содержат текста отчета. Попробуйте снова или выберите другую тему/сущность.</p>
-                </div>
-            `;
+          dateStr = item.date;
         }
-    })
-    .catch(error => {
-        console.error('Error generating report:', error);
+      }
+    }
+
+    return `
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0">Канал: ${this.escapeHtml(item.channel_name)}</h5>
+        <small>${dateStr}</small>
+      </div>
+      <div class="card-body">
+        <p class="card-text markdown-content">${this.escapeHtml(item.text)}</p>
+        <div class="d-flex flex-wrap gap-2 mt-3">
+          ${this.getSentimentHtml(item.sentiment)}
+          ${this.getTopicsHtml(item.topics)}
+          ${this.getEntityHtml(item.main_entity)}
+          <small class="text-muted ms-auto">Просмотры: ${item.views ?? "N/A"}</small>
+        </div>
+      </div>
+    </div>`;
+  } catch (err) {
+    console.error("Error rendering news item:", err, item);
+    return `<div class="alert alert-danger">Ошибка отображения новости</div>`;
+  }
+}
+
+    getSectionContent(header) {
+        let content = [];
+        let nextEl = header.nextElementSibling;
         
-        let errorMessage = error.error || 'Произошла неизвестная ошибка при генерации отчета';
-        if (error.error && error.error.includes('No news found')) {
-            document.getElementById('reportResults').innerHTML = `
-                <div class="alert alert-info">
-                    <h5>Нет данных для анализа</h5>
-                    <p>Не найдено новостей по ${reportType === 'entity' ? 'сущности' : 'теме'} "${entityOrTopic}" за выбранный период.</p>
-                    <p>Попробуйте изменить параметры запроса или выбрать другой временной период.</p>
+        while (nextEl && !nextEl.matches('h1, h2, h3')) {
+            content.push(nextEl.outerHTML);
+            nextEl = nextEl.nextElementSibling;
+        }
+        
+        if (content.length === 0) return null;
+        
+        const wrapper = document.createElement('div');
+        wrapper.innerHTML = content.join('');
+        header.insertAdjacentElement('afterend', wrapper);
+        return wrapper;
+    }
+
+    showError(message) {
+        const toast = document.createElement('div');
+        toast.className = 'error-toast';
+        toast.textContent = message;
+        document.body.appendChild(toast);
+        
+        setTimeout(() => {
+            toast.classList.add('fade-out');
+            setTimeout(() => toast.remove(), 300);
+        }, 5000);
+    }
+    
+    escapeHtml(str) {
+        if (typeof str !== "string") return String(str || "");
+        return str
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;")
+            .replace(/`/g, "&#96;");
+    }
+    
+    monitorReportStatus(requestId, query, period) {
+        const container = document.getElementById("reportContainer");
+        if (!container) return;
+        
+        container.innerHTML = `
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h4>Генерация отчета</h4>
                 </div>
-            `;
-        } else {
-            document.getElementById('reportResults').innerHTML = `
-                <div class="alert alert-danger">
-                    <h5>Ошибка при генерации отчета</h5>
-                    <p>${errorMessage}</p>
-                    ${error.raw_data ? `<pre class="mt-3 small">${JSON.stringify(error.raw_data, null, 2)}</pre>` : ''}
+                <div class="card-body">
+                    <p>Отчет по запросу "${this.escapeHtml(query)}" в процессе генерации.</p>
+                    <p>Это может занять несколько минут...</p>
+                    <div class="progress">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated" style="width: 100%"></div>
+                    </div>
                 </div>
-            `;
+            </div>
+        `;
+        
+        // Проверяем статус отчета каждые 10 секунд
+        this.statusCheckInterval = setInterval(async () => {
+            try {
+                const response = await fetch(`/api/proxy/reports/status?id=${requestId}`);
+                if (!response.ok) throw new Error('Network response was not ok');
+                
+                const data = await response.json();
+                
+                if (data.status === 'completed' && data.report_text) {
+                    clearInterval(this.statusCheckInterval);
+                    this.displayReport(data.report_text, query, period);
+                } else if (data.status === 'failed') {
+                    clearInterval(this.statusCheckInterval);
+                    this.showError('Не удалось сгенерировать отчет: ' + (data.error || 'Неизвестная ошибка'));
+                }
+                // Для статуса 'pending' продолжаем ожидание
+                
+            } catch (error) {
+                console.error('Error checking report status:', error);
+                // Не останавливаем проверку при одиночной ошибке сети
+            }
+        }, 10000);
+    }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    new TrendsDashboard();
+    
+    loadEntitiesAndTopics();
+    
+    // Исправляем проблему "Распределение тональности Загрузка.."
+    document.querySelectorAll('h3, h4, h5').forEach(heading => {
+        const text = heading.textContent;
+        if (text && text.includes('Загрузка')) {
+            heading.textContent = text.replace(/\s*Загрузка\.+\s*/, '');
+        }
+    });
+    
+    // Скрываем все индикаторы загрузки через 3 секунды после загрузки
+    setTimeout(() => {
+        document.querySelectorAll('.loading-indicator, .loading-placeholder').forEach(loader => {
+            loader.style.display = 'none';
+        });
+    }, 3000);
+});
+
+// window.searchTopic = function(topic) {
+//     window.location.href = `/search?q=${encodeURIComponent(topic)}&type=topic`;
+// }
+
+// window.searchEntity = function(entity) {
+//     window.location.href = `/search?q=${encodeURIComponent(entity)}&type=entity`;
+// }
+
+window.toggleSection = function(sectionId) {
+    const section = document.getElementById(sectionId);
+    if (!section) return;
+    
+    section.classList.toggle('collapsed');
+    const icon = section.previousElementSibling.querySelector('.toggle-icon');
+    if (icon) {
+        icon.classList.toggle('expanded');
+    }
+}
+
+window.copyReportToClipboard = function(btn) {
+    const reportContent = btn.closest('.report-card').querySelector('.report-content');
+    if (!reportContent) return;
+    
+    const text = reportContent.textContent;
+    navigator.clipboard.writeText(text)
+        .then(() => {
+            const originalText = btn.textContent;
+            btn.textContent = 'Скопировано!';
+            setTimeout(() => {
+                btn.textContent = originalText;
+            }, 2000);
+        })
+        .catch(err => {
+            console.error('Ошибка копирования:', err);
+            alert('Не удалось скопировать отчет');
+        });
+}
+
+window.toggleReportFullscreen = function(btn) {
+    const reportCard = btn.closest('.report-card');
+    if (!reportCard) return;
+    
+    reportCard.classList.toggle('fullscreen');
+    btn.textContent = reportCard.classList.contains('fullscreen') ? 
+        'Свернуть' : 'Развернуть';
+}
+
+// Убираем нерабочий код расширения querySelectorAll
+function hideLoadingText() {
+    document.querySelectorAll('h3, h4, h5').forEach(heading => {
+        if (heading.textContent.includes('Загрузка')) {
+            heading.classList.add('loading-hidden');
         }
     });
 }
+document.addEventListener('DOMContentLoaded', hideLoadingText);
 
-// Инициализация обработчиков событий для формы отчета
-function initReportHandlers() {
-    console.log("Initializing report handlers");
-    const reportForm = document.getElementById('reportForm');
-    const reportType = document.getElementById('reportType');
-    
-    if (reportForm) {
-        reportForm.addEventListener('submit', function(e) {
-            console.log("Report form submitted");
-            e.preventDefault(); // Это критически важно
-            generateReport();
-        });
-    } else {
-        console.warn("Report form not found in DOM");
+async function loadEntitiesAndTopics() {
+    try {
+        const [entitiesRes, topicsRes] = await Promise.all([
+            fetch('/api/proxy/trends/entities?limit=30'),
+            fetch('/api/proxy/trends/topics?limit=20')
+        ]);
+        
+        const entities = await entitiesRes.json();
+        const topics = await topicsRes.json();
+        
+        populateSelect('entitySelect', entities.entities || entities);
+        populateSelect('topicSelect', topics.topics || topics);
+    } catch (error) {
+        console.error('Ошибка загрузки данных:', error);
     }
-    
-    if (reportType) {
-        reportType.addEventListener('change', updateSuggestionList);
-    }
-    
-    // Инициализируем список подсказок
-    updateSuggestionList();
 }
 
-// Инициализируем всё при загрузке DOM
-document.addEventListener('DOMContentLoaded', function() {
-    console.log("DOM loaded, initializing reports functionality");
+function populateSelect(selectId, items) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
     
-    // Убедимся, что datalist элементы существуют
-    if (!document.getElementById('topicsList')) {
-        console.log("Creating topics datalist");
-        const topicsList = document.createElement('datalist');
-        topicsList.id = 'topicsList';
-        document.body.appendChild(topicsList);
-    }
-    
-    if (!document.getElementById('entitiesList')) {
-        console.log("Creating entities datalist");
-        const entitiesList = document.createElement('datalist');
-        entitiesList.id = 'entitiesList';
-        document.body.appendChild(entitiesList);
-    }
-    
-    // Загрузим данные для подсказок
-    loadEntitiesAndTopics();
-    
-    // Инициализируем обработчики
-    initReportHandlers();
-});
-
-// Экспортируем функции, которые могут быть вызваны извне
-window.generateReport = generateReport;
-window.printReport = printReport;
+    select.innerHTML = `<option value="">Выберите...</option>` +
+        (items || []).map(item => {
+            const value = item.entity || item.topic || item.name || item.label || item;
+            const text = value;
+            return `<option value="${value}">${text}</option>`;
+        }).join('');
+}
 </script>
+
+<style>
+.trends-container {
+    padding: 20px;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+.page-title {
+    margin-bottom: 20px;
+    text-align: center;
+}
+
+.time-range-selector {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+    justify-content: center;
+}
+
+.time-range-btn {
+    min-width: 100px;
+}
+
+.trends-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 20px;
+    margin-bottom: 30px;
+}
+
+.trend-card {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    overflow: hidden;
+}
+
+.card-header {
+    padding: 15px;
+    background: #f8f9fa;
+    border-bottom: 1px solid #eee;
+}
+
+.card-body {
+    padding: 15px;
+}
+
+.trend-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.trend-link {
+    color: #0366d6;
+    text-decoration: none;
+}
+
+.trend-count {
+    color: #6c757d;
+}
+
+.loading-placeholder {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #6c757d;
+}
+
+.no-data {
+    color: #6c757d;
+    text-align: center;
+    padding: 20px 0;
+}
+
+.report-section {
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    margin-bottom: 30px;
+}
+
+.report-form {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 15px;
+    margin-bottom: 15px;
+}
+
+.form-group {
+    margin-bottom: 0;
+}
+
+#reportContainer {
+    margin-top: 20px;
+}
+
+.report-card {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    overflow: hidden;
+}
+
+.report-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px;
+    background: #f8f9fa;
+    border-bottom: 1px solid #eee;
+}
+
+.report-actions {
+    display: flex;
+    gap: 10px;
+}
+
+.report-meta {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px 15px;
+    background: #f8f9fa;
+    border-bottom: 1px solid #eee;
+    font-size: 0.9em;
+    color: #6c757d;
+}
+
+.report-content {
+    padding: 15px;
+}
+
+.report-content h3 {
+    margin-top: 20px;
+    margin-bottom: 10px;
+    font-size: 1.2em;
+}
+
+.report-content pre {
+    background: #f5f5f5;
+    padding: 10px;
+    border-radius: 4px;
+    overflow-x: auto;
+}
+
+.report-content code {
+    background: #f5f5f5;
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-family: monospace;
+}
+
+.section-toggle {
+    background: none;
+    border: none;
+    text-align: left;
+    width: 100%;
+    padding: 5px 0;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.collapsible-section {
+    padding-left: 15px;
+    border-left: 2px solid #eee;
+    margin: 10px 0;
+    max-height: none;
+    overflow: hidden;
+    transition: max-height 0.3s ease;
+}
+
+.collapsible-section.collapsed {
+    max-height: 0;
+}
+
+.error-toast {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: #dc3545;
+    color: white;
+    padding: 10px 20px;
+    border-radius: 4px;
+    z-index: 1000;
+    animation: slideIn 0.3s;
+}
+
+.error-toast.fade-out {
+    animation: fadeOut 0.3s forwards;
+}
+
+@keyframes slideIn {
+    from { transform: translateX(100%); }
+    to { transform: translateX(0); }
+}
+
+@keyframes fadeOut {
+    from { opacity: 1; }
+    to { opacity: 0; }
+}
+
+.fullscreen {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 1000;
+    margin: 0;
+    border-radius: 0;
+    overflow-y: auto;
+}
+
+.chart-container {
+    position: relative;
+    height: 200px;
+    margin-top: 20px;
+}
+
+/* Скрываем индикаторы загрузки в заголовках */
+.loading-hidden {
+    display: none !important;
+}
+
+/* Стили для спиннера загрузки */
+.spinner-border {
+    display: inline-block;
+    width: 2rem;
+    height: 2rem;
+    vertical-align: -0.125em;
+    border: 0.25em solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: spinner-border .75s linear infinite;
+}
+
+.spinner-border-sm {
+    width: 1rem;
+    height: 1rem;
+    border-width: 0.2em;
+}
+
+@keyframes spinner-border {
+    to { transform: rotate(360deg); }
+}
+
+/* Вспомогательные классы */
+.loading-indicator {
+    text-align: center;
+    padding: 20px 0;
+}
+
+.d-none {
+    display: none !important;
+}
+
+.d-flex {
+    display: flex !important;
+}
+
+.align-items-center {
+    align-items: center !important;
+}
+
+.justify-content-center {
+    justify-content: center !important;
+}
+
+.text-center {
+    text-align: center !important;
+}
+
+.text-muted {
+    color: #6c757d !important;
+}
+
+.mb-4 {
+    margin-bottom: 1.5rem !important;
+}
+
+.mb-3 {
+    margin-bottom: 1rem !important;
+}
+
+.my-4 {
+    margin-top: 1.5rem !important;
+    margin-bottom: 1.5rem !important;
+}
+
+.py-3 {
+    padding-top: 1rem !important;
+    padding-bottom: 1rem !important;
+}
+
+/* Исправляем тональности на диаграмме */
+.text-success {
+    color: #28a745 !important;
+}
+
+.text-danger {
+    color: #dc3545 !important;
+}
+
+.text-secondary {
+    color: #6c757d !important;
+}
+
+.toggle-icon {
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 8px solid #6c757d;
+    transition: transform 0.3s;
+}
+
+.toggle-icon.expanded {
+    transform: rotate(180deg);
+}
+
+/* Анимации */
+.fade {
+    transition: opacity 0.15s linear;
+}
+
+.fade:not(.show) {
+    opacity: 0;
+}
+</style>
 {% endblock %}

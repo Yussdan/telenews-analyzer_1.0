@@ -1,236 +1,271 @@
-# Обновленный server.py для llm-service
 import os
-import subprocess
+import gc
 import time
 import logging
-from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import Optional
-import uvicorn
-import requests
-import asyncio
-from fastapi.middleware.cors import CORSMiddleware
+import threading
+from flask import Flask, request, jsonify
+import json
+import psutil
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("llm-service")
+try:
+    from llama_cpp import Llama
+except Exception as e:
+    print("Failed to import llama_cpp:", e)
+    raise
 
-app = FastAPI()
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# Добавляем CORS для возможного веб-интерфейса
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+MODEL_PATH = os.getenv("MODEL_PATH", "/app/models/model.gguf")
+CONTEXT_SIZE = int(os.getenv("CONTEXT_SIZE", "1024"))
+MODEL_TYPE = os.getenv("MODEL_TYPE", "llama").lower()
+GPU_LAYERS = int(os.getenv("GPU_LAYERS", "0"))
+LLAMA_THREADS = int(os.getenv("LLAMA_THREADS", "6"))
+LLAMA_BATCH_SIZE = int(os.getenv("LLAMA_BATCH_SIZE", "512"))
+LLAMA_CPU_OFFLOAD = int(os.getenv("LLAMA_CPU_OFFLOAD", "0")) > 0
+GENERATION_TIMEOUT = int(os.getenv("GENERATION_TIMEOUT", "90"))
+ROPE_FREQ_BASE = float(os.getenv("ROPE_FREQ_BASE", "10000.0"))
+MAX_TOKENS_DEFAULT = int(os.getenv("MAX_TOKENS_DEFAULT", "512"))
+USE_MLOCK = int(os.getenv("USE_MLOCK", "1")) > 0
+MUL_MAT_Q = int(os.getenv("MUL_MAT_Q", "1")) > 0
+TFS_Z = float(os.getenv("TFS_Z", "1.0"))
+TYPICAL_P = float(os.getenv("TYPICAL_P", "1.0"))
+MIROSTAT_MODE = int(os.getenv("MIROSTAT_MODE", "0"))
+MIROSTAT_TAU = float(os.getenv("MIROSTAT_TAU", "5.0"))
+MIROSTAT_ETA = float(os.getenv("MIROSTAT_ETA", "0.1"))
 
-# Переменные и пути
-LLAMA_SERVER_PATHS = [
-    "/app/llama.cpp/server",
-    "/app/llama.cpp/build/bin/llama-server"
-]
-MODEL_PATH = os.environ.get("MODEL_PATH", "/app/models/mistral-7b-instruct-q4_0.gguf")
-LLAMA_PORT = int(os.environ.get("LLAMA_PORT", "8080"))
-MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "3"))
-RETRY_DELAY = int(os.environ.get("RETRY_DELAY", "5"))
-LLAMA_TIMEOUT = int(os.environ.get("LLAMA_TIMEOUT", "60"))
-MODEL_READY = False
+OPTIMAL_CORE_COUNT = min(os.cpu_count() or 1, 6)
+PHYSICAL_CORES = psutil.cpu_count(logical=False) or 1
+REPORT_MAX_NEWS = int(os.getenv("REPORT_MAX_NEWS", "3"))
 
-# Кэш для ускорения повторных запросов
-PROMPT_CACHE = {}
-CACHE_SIZE_LIMIT = 100
+app = Flask(__name__)
 
-def find_llama_server():
-    for path in LLAMA_SERVER_PATHS:
-        if os.path.exists(path):
-            return path
-    raise FileNotFoundError("Could not find llama.cpp server executable")
+model = None
+model_lock = threading.RLock()
+model_ready = False
 
-def start_llama_server():
-    server_path = find_llama_server()
-    
-    cmd = [
-        server_path,
-        "-m", MODEL_PATH,
-        "-c", "2048",
-        "--host", "0.0.0.0",
-        "--port", str(LLAMA_PORT),
-        "-t", "4",
-        "--ctx-size", "2048"
-    ]
-    
-    try:
-        logger.info(f"Starting llama.cpp server with command: {' '.join(cmd)}")
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        
-        # Ждем некоторое время для запуска
-        time.sleep(2)
-        if process.poll() is not None:
-            stderr = process.stderr.read().decode()
-            raise RuntimeError(f"Server failed to start: {stderr}")
-            
-        return process
-    except Exception as e:
-        logger.error(f"Failed to start llama server: {str(e)}")
-        raise RuntimeError(f"Failed to start llama server: {str(e)}")
+class GenerationTimeout(Exception):
+    pass
 
-class GenerationRequest(BaseModel):
-    prompt: str
-    max_tokens: Optional[int] = 200
-    temperature: Optional[float] = 0.7
-    cache_key: Optional[str] = None
-    is_report: bool = False
-
-class GenerationResponse(BaseModel):
-    generated_text: str
-    cached: bool = False
-    error: Optional[str] = None
-
-async def check_model_readiness():
-    global MODEL_READY
-    max_attempts = 10
-    for attempt in range(max_attempts):
+def cleanup_memory():
+    gc.collect()
+    if os.name == 'posix':
         try:
-            # Проверка, что llama сервер отвечает
-            response = requests.get(f"http://localhost:{LLAMA_PORT}/health", timeout=5)
-            if response.status_code == 200:
-                # Тестовый запрос генерации
-                test_req = {
-                    "prompt": "test",
-                    "n_predict": 1,
-                    "temperature": 0.7
-                }
-                test_resp = requests.post(
-                    f"http://localhost:{LLAMA_PORT}/completion", 
-                    json=test_req,
-                    timeout=10
-                )
-                if test_resp.status_code == 200:
-                    MODEL_READY = True
-                    logger.info("Model is ready and fully initialized!")
-                    return
+            import ctypes
+            libc = ctypes.CDLL('libc.so.6')
+            if hasattr(libc, 'malloc_trim'):
+                libc.malloc_trim(0)
         except Exception as e:
-            logger.warning(f"Model readiness check attempt {attempt+1}/{max_attempts} failed: {str(e)}")
-        
-        # Увеличивающиеся интервалы ожидания
-        wait_time = 5 + attempt * 5
-        logger.info(f"Waiting {wait_time}s before next readiness check...")
-        await asyncio.sleep(wait_time)
-    
-    logger.warning("Could not confirm model readiness after multiple attempts. Will try to serve requests anyway.")
-    MODEL_READY = True 
+            logger.debug(f"malloc_trim: {e}")
 
-@app.on_event("startup")
-async def startup_event():
-    try:
-        app.state.llama_process = start_llama_server()
-        # Запускаем проверку готовности в фоне
-        asyncio.create_task(check_model_readiness())
-    except Exception as e:
-        logger.error(f"Failed to initialize LLM service: {str(e)}")
-        raise RuntimeError(f"Failed to initialize LLM service: {str(e)}")
-
-@app.post("/generate", response_model=GenerationResponse)
-async def generate(request: GenerationRequest):
-    # Проверка готовности модели
-    if not MODEL_READY:
-        logger.warning("Model not yet ready, returning early response")
-        return GenerationResponse(
-            generated_text="",
-            error="Model is still initializing, please try again in a few moments."
-        )
-    
-    # Проверка кэша
-    cache_key = request.cache_key or request.prompt[:100]
-    if cache_key in PROMPT_CACHE:
-        logger.info(f"Cache hit for prompt beginning with: {request.prompt[:20]}...")
-        return GenerationResponse(
-            generated_text=PROMPT_CACHE[cache_key],
-            cached=True
-        )
-    
-    # Укорачиваем длинные промпты
-    if not request.is_report:
-        safe_prompt = request.prompt
-        if len(safe_prompt) > 1000:
-            logger.warning(f"Long prompt detected ({len(safe_prompt)} chars), truncating to 1000 chars")
-            safe_prompt = safe_prompt[:1000] + "..."
-    
-    llama_request = {
-        "prompt": safe_prompt,
-        "n_predict": min(request.max_tokens, 500),
-        "temperature": request.temperature,
-        "stop": ["</s>", "user:", "User:"]
-    }
-    
-    # Используем retry логику
-    for attempt in range(MAX_RETRIES):
+def load_model():
+    global model, model_ready
+    with model_lock:
         try:
-            response = requests.post(
-                f"http://localhost:{LLAMA_PORT}/completion",
-                json=llama_request,
-                timeout=LLAMA_TIMEOUT
+            if model is not None:
+                del model
+                model = None
+                gc.collect()
+                time.sleep(1)
+
+            n_threads = min(LLAMA_THREADS, PHYSICAL_CORES)
+            logger.info(f"Загрузка модели из {MODEL_PATH} с n_threads={n_threads}, n_batch={LLAMA_BATCH_SIZE}")
+            params = {
+                "model_path": MODEL_PATH,
+                "n_ctx": CONTEXT_SIZE,
+                "n_batch": LLAMA_BATCH_SIZE,
+                "n_threads": n_threads,
+                "n_gpu_layers": GPU_LAYERS,
+                "f16_kv": True,
+                "verbose": False,
+                "offload_kqv": LLAMA_CPU_OFFLOAD,
+                "embedding": False,
+                "rope_freq_base": ROPE_FREQ_BASE,
+                "use_mlock": USE_MLOCK,
+                "mul_mat_q": MUL_MAT_Q,
+            }
+
+            available_memory = psutil.virtual_memory().available / (1024 * 1024 * 1024)
+            logger.info(f"Доступная память: {available_memory:.2f} GB")
+
+            model = Llama(**params)
+
+            _ = model.create_completion(
+                "Проверка загрузки модели.",
+                max_tokens=5,
+                temperature=0.1
+            )
+
+            _ = model.create_completion(
+                "Повторный прогрев модели для улучшения производительности.",
+                max_tokens=10,
+                temperature=0.1
             )
             
-            if response.status_code == 200:
-                generated_text = response.json().get("content", "")
-                
-                # Кэширование результата
-                if len(PROMPT_CACHE) >= CACHE_SIZE_LIMIT:
-                    # Простая стратегия вытеснения: удаляем первый элемент
-                    PROMPT_CACHE.pop(next(iter(PROMPT_CACHE)))
-                PROMPT_CACHE[cache_key] = generated_text
-                
-                return GenerationResponse(generated_text=generated_text)
-            else:
-                logger.warning(f"LLM request attempt {attempt+1} returned status code {response.status_code}")
-        except requests.exceptions.Timeout:
-            logger.warning(f"LLM request attempt {attempt+1} timed out after {LLAMA_TIMEOUT}s")
+            logger.info(f"Модель {MODEL_TYPE} успешно загружена и оптимизирована!")
+            model_ready = True
+            return True
         except Exception as e:
-            logger.error(f"LLM request attempt {attempt+1} error: {str(e)}")
-        
-        # Не ждем перед последней попыткой
-        if attempt < MAX_RETRIES - 1:
-            await asyncio.sleep(RETRY_DELAY)
-    
-    # Если все попытки не удались, возвращаем пустую строку с ошибкой
-    logger.error("All LLM request attempts failed")
-    return GenerationResponse(
-        generated_text="",
-        error="LLM service failed to generate text after multiple attempts"
-    )
+            logger.error(f"Ошибка загрузки модели: {e}", exc_info=True)
+            model_ready = False
+            return False
 
-@app.get("/health")
-async def health_check():
-    llama_status = "unknown"
+def periodic_cleanup():
+    while True:
+        time.sleep(300)
+        logger.debug("Периодическая очистка памяти")
+        cleanup_memory()
+
+cleanup_thread = threading.Thread(target=periodic_cleanup, daemon=True)
+cleanup_thread.start()
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    cpu_percent = psutil.cpu_percent(interval=0.1)
+    memory = psutil.virtual_memory()
+    memory_percent = memory.percent
+    available_memory_gb = memory.available / (1024 * 1024 * 1024)
+    
+    return jsonify({
+        "status": "ready" if model_ready else "loading",
+        "model_path": MODEL_PATH,
+        "model_type": MODEL_TYPE,
+        "context_size": CONTEXT_SIZE,
+        "threads": LLAMA_THREADS,
+        "batch_size": LLAMA_BATCH_SIZE,
+        "gpu_layers": GPU_LAYERS,
+        "cpu_offload": LLAMA_CPU_OFFLOAD,
+        "system_stats": {
+            "cpu_percent": cpu_percent,
+            "memory_percent": memory_percent,
+            "available_memory_gb": round(available_memory_gb, 2)
+        }
+    })
+
+@app.route("/generate", methods=["POST"])
+def generate():
+    global model, model_ready
+    if not model_ready:
+        return jsonify({"error": "Модель еще загружается", "status": "loading"}), 503
+
     try:
-        response = requests.get(f"http://localhost:{LLAMA_PORT}/health", timeout=5)
-        llama_status = "running" if response.ok else "unhealthy"
-    except:
-        llama_status = "down"
-    
-    return {
-        "status": "ok", 
-        "llm_status": llama_status,
-        "model_ready": MODEL_READY,
-        "cache_size": len(PROMPT_CACHE)
-    }
+        data = request.json
+        if not data:
+            return jsonify({"error": "Отсутствуют входные данные"}), 400
 
-@app.get("/clear-cache")
-async def clear_cache():
-    global PROMPT_CACHE
-    cache_size = len(PROMPT_CACHE)
-    PROMPT_CACHE = {}
-    return {"status": "ok", "cleared_entries": cache_size}
+        prompt = data.get("prompt", "")
+        if not prompt:
+            return jsonify({"error": "Пустой промпт"}), 400
+
+        logger.info(f"Получен промпт (длина: {len(prompt)}): {prompt[:200]}...")
+
+        max_tokens = min(int(data.get("max_tokens", MAX_TOKENS_DEFAULT)), CONTEXT_SIZE - 100)
+        temperature = float(data.get("temperature", 0.7))
+        top_p = float(data.get("top_p", 0.9))
+        top_k = int(data.get("top_k", 40))
+        repeat_penalty = float(data.get("repeat_penalty", 1.1))
+        presence_penalty = float(data.get("presence_penalty", 0.0))
+        frequency_penalty = float(data.get("frequency_penalty", 0.0))
+        stop_words = data.get("stop", None)
+
+        is_report = data.get("is_report", False)
+
+        if is_report:
+            temperature = min(temperature, 0.6)
+            top_p = 0.85
+            repeat_penalty = 1.2
+            presence_penalty = 0.1
+            frequency_penalty = 0.2
+            mirostat_mode = 2
+            mirostat_tau = 5.0
+            mirostat_eta = 0.1
+        else:
+            mirostat_mode = MIROSTAT_MODE
+            mirostat_tau = MIROSTAT_TAU
+            mirostat_eta = MIROSTAT_ETA
+
+        max_prompt_length = CONTEXT_SIZE * 2
+        if len(prompt) > max_prompt_length and not is_report:
+            logger.warning(f"Промпт слишком длинный ({len(prompt)}), обрезаем.")
+            prompt = prompt[:max_prompt_length]
+
+        adjusted_timeout = GENERATION_TIMEOUT * 2
+        cleanup_memory()
+
+        with model_lock:
+            try:
+                start_time = time.time()
+                logger.debug(f"Параметры генерации: max_tokens={max_tokens}, temp={temperature}, top_p={top_p}, repeat_penalty={repeat_penalty}")
+                
+                generation_params = {
+                    "prompt": prompt,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "top_k": top_k,
+                    "repeat_penalty": repeat_penalty,
+                    "presence_penalty": presence_penalty,
+                    "frequency_penalty": frequency_penalty,
+                    "mirostat_mode": mirostat_mode,
+                    "mirostat_tau": mirostat_tau,
+                    "mirostat_eta": mirostat_eta,
+                    "tfs_z": TFS_Z,
+                    "typical_p": TYPICAL_P,
+                    "stop": stop_words
+                }
+
+                output = model.create_completion(**generation_params)
+                generation_time = time.time() - start_time
+                logger.debug(f"Полный ответ модели: {json.dumps(output, ensure_ascii=False)}")
+
+                generated_text = output["choices"][0]["text"]
+
+                logger.info(f"Сгенерировано {len(generated_text)} символов за {generation_time:.2f} сек.")
+                logger.info(f"Ответ LLM (полностью): {generated_text}")
+
+                cleanup_memory()
+
+                return jsonify({
+                    "generated_text": generated_text,
+                    "model": MODEL_TYPE,
+                    "generation_time": round(generation_time, 2),
+                    "tokens_generated": output["usage"].get("completion_tokens", 0),
+                    "tokens_total": output["usage"].get("total_tokens", 0)
+                })
+
+            except GenerationTimeout:
+                logger.error("Превышено время генерации")
+                return jsonify({
+                    "error": "Превышено время генерации",
+                    "timeout": adjusted_timeout
+                }), 408
+
+            except Exception as e:
+                logger.error(f"Ошибка генерации: {e}", exc_info=True)
+                return jsonify({"error": f"Ошибка генерации: {str(e)}"}), 500
+
+    except Exception as e:
+        logger.error(f"Ошибка запроса: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/reload", methods=["POST"])
+def reload_model():
+    global model_ready
+    model_ready = False
+    try:
+        reload_thread = threading.Thread(target=load_model, daemon=True)
+        reload_thread.start()
+        return jsonify({"status": "reload_started", "message": "Перезагрузка модели запущена"})
+    except Exception as e:
+        logger.error(f"Ошибка при запуске перезагрузки: {e}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    try:
+        import os
+        os.nice(-10)
+    except:
+        pass
+
+    load_model()
+    app.run(host="0.0.0.0", port=8000)

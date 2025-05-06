@@ -1,1144 +1,706 @@
-from pyspark.sql import SparkSession, Row
-from pyspark.sql.functions import (
-    udf, col, from_json, avg, count,
-    collect_set, window,
-    explode_outer, filter as spark_filter, size
-)
+
+import os
+import json
+import logging
+import re
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import from_json, col, udf, length
 from pyspark.sql.types import (
     ArrayType, StructType, StructField, StringType, FloatType,
-    TimestampType, IntegerType, BooleanType
+    TimestampType, IntegerType
 )
-import spacy
-import logging
-import json
-import os
-from pymongo import MongoClient, errors as pymongo_errors
-import time
-import requests
-import traceback # Import traceback for better error logging
-from datetime import datetime # For mention timestamp
-import pandas as pd
+import hashlib
+from pymongo import MongoClient, UpdateOne, ASCENDING
+import asyncio
+from functools import partial
+import nest_asyncio
 
-# Импортируем наш новый SentimentAnalyzer и TopicModeler
-from sentiment_analysis import SentimentAnalyzer, EntityMentionAnalyzer
-from topic_modeling import TopicModeler
-from db_connection import connect_to_elasticsearch, connect_to_mongodb # Assuming connect_to_mongodb is also in db_connection
-
-# Configure logging
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, 
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Environment variables (consider using a config management library for larger projects)
-ELASTICSEARCH_HOST = os.getenv("ELASTICSEARCH_HOST", "elasticsearch")
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, 
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# ---- Конфиги ---- #
+KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "kafka:9092")
 ELASTICSEARCH_PORT = os.getenv("ELASTICSEARCH_PORT", "9200")
 ELASTICSEARCH_NEWS_INDEX = os.getenv("ELASTICSEARCH_NEWS_INDEX", "telegram_news")
-ELASTICSEARCH_METRICS_INDEX = os.getenv("ELASTICSEARCH_METRICS_INDEX", "telegram_metrics")
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://mongodb:27017")
 MONGODB_DB = os.getenv("MONGODB_DB", "telegram_news")
-KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "kafka:9092")
-KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "telegram_news")
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "20"))
-RETRY_DELAY = int(os.getenv("RETRY_DELAY", "30"))
-CONNECTION_TIMEOUT = int(os.getenv("CONNECTION_TIMEOUT", "60"))
-LOCAL_LLM_URL = os.getenv("LOCAL_LLM_URL", "http://llm-service:8000/generate")
-USE_LOCAL_LLM = os.getenv("USE_LOCAL_LLM", "true").lower() == "true"
-POSTGRES_URI = os.getenv("POSTGRES_URI", "postgresql://admin:password@postgres:5432/telenews")
+LLM_SENTIMENT_URL = os.getenv("LLM_SENTIMENT_URL", "http://llm-light-1:8000/generate")
+LLM_TOPICS_URL = os.getenv("LLM_TOPICS_URL", "http://llm-light-2:8000/generate")
+LLM_ENTITY_URL = os.getenv("LLM_ENTITY_URL", "http://llm-light-3:8000/generate")
+CHECKPOINT_DIR = os.getenv("SPARK_CHECKPOINT_DIR", "/tmp/checkpoints_realtime")
 DRIVER_MEMORY = os.getenv("SPARK_DRIVER_MEMORY", "4g")
 EXECUTOR_MEMORY = os.getenv("SPARK_EXECUTOR_MEMORY", "8g")
-CHECKPOINT_BASE_DIR = os.getenv("SPARK_CHECKPOINT_DIR", "/tmp/spark-checkpoints")
-SENTIMENT_CACHE_LIMIT = int(os.getenv("SENTIMENT_CACHE_LIMIT", "50000"))
-TOPIC_CACHE_LIMIT = int(os.getenv("TOPIC_CACHE_LIMIT", "10000"))
-MODEL_UPDATE_FREQUENCY_BATCHES = int(os.getenv("MODEL_UPDATE_FREQUENCY_BATCHES", "60"))
+ELASTICSEARCH_HOST = os.getenv("ELASTICSEARCH_HOST", "elasticsearch")
+ELASTICSEARCH_METRICS_INDEX = os.getenv("ELASTICSEARCH_METRICS_INDEX", "telegram_metrics")
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "telegram_news")
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+RETRY_DELAY = int(os.getenv("RETRY_DELAY", "3"))
+CONNECTION_TIMEOUT = int(os.getenv("CONNECTION_TIMEOUT", "200"))
+POSTGRES_URI = os.getenv("POSTGRES_URI", "postgresql://admin:password@postgres:5432/telenews")
+USE_LIGHTWEIGHT_LLM = os.getenv("USE_LIGHTWEIGHT_LLM", "true").lower() == "true"
 
 
-# Определение схемы сообщения для парсинга JSON из Kafka
 message_schema = StructType([
-    StructField("id", StringType(), False),
+    StructField("id", StringType(), True),
     StructField("text", StringType(), True),
     StructField("channel_id", StringType(), True),
     StructField("channel_name", StringType(), True),
     StructField("date", TimestampType(), True),
-    StructField("views", IntegerType(), True),
-    StructField("forwards", IntegerType(), True),
-    StructField("has_media", StringType(), True)
-])
-
-# Определение расширенной схемы для UDF с учетом локальной LLM
-sentiment_schema = StructType([
-    StructField("label", StringType(), True), # Allow nulls for error cases
-    StructField("score", FloatType(), True),
-    StructField("method", StringType(), True),
-    StructField("explanation", StringType(), True)
-])
-
-# Расширенная схема для тем с учетом нового TopicModeler
-topic_schema = StructType([
-    StructField("label", StringType(), True),
-    StructField("keywords", ArrayType(StringType(), True), True),
-    StructField("entities", ArrayType(StringType(), True), True),
-    StructField("similarity", FloatType(), True)
-])
-
-topics_array_schema = ArrayType(topic_schema, True)
-
-# Схема для сущностей (главная сущность)
-entity_schema = StructType([
-    StructField("name", StringType(), True),
-    StructField("type", StringType(), True),
-    StructField("description", StringType(), True),
-    StructField("method", StringType(), True)
-])
-
-# Схема для упоминаний сущностей (возвращаемая analysis function, используется в ES)
-entity_mention_schema = StructType([
-    StructField("entity_id", StringType(), True),
-    StructField("entity_name", StringType(), True),
-    StructField("sentiment", sentiment_schema, True) 
-])
-
-entity_mentions_array_schema = ArrayType(entity_mention_schema, True)
-
-
-final_output_schema = StructType([
-    StructField("id", StringType(), False),
-    StructField("channel_id", StringType(), True),
-    StructField("channel_name", StringType(), True),
-    StructField("date", TimestampType(), True),
-    StructField("text", StringType(), True),
-    StructField("views", IntegerType(), True),
-    StructField("forwards", IntegerType(), True),
-    StructField("has_media", BooleanType(), True),
-    StructField("kafka_timestamp", TimestampType(), True),
-    StructField("processing_time", TimestampType(), False),
-    StructField("text_length", IntegerType(), True),
-    StructField("sentiment", sentiment_schema, True),
-    StructField("topics", topics_array_schema, True),
-    StructField("main_entity", entity_schema, True),
-    StructField("entity_mentions", entity_mentions_array_schema, True)
-])
-
-
-intermediate_map_output_schema = StructType([
-    StructField("id", StringType(), False),
-    StructField("channel_id", StringType(), True),
-    StructField("channel_name", StringType(), True),
-    StructField("date", TimestampType(), True),
-    StructField("text", StringType(), True),
     StructField("views", IntegerType(), True),
     StructField("forwards", IntegerType(), True),
     StructField("has_media", StringType(), True),
-    StructField("kafka_timestamp", TimestampType(), True),
-    StructField("processing_time", TimestampType(), False),
-    StructField("text_length", IntegerType(), True),
-    StructField("sentiment_json", StringType(), True),
-    StructField("topics_json", StringType(), True),
-    StructField("main_entity_json", StringType(), True),
-    StructField("entity_mentions_json", StringType(), True)
 ])
 
+sentiment_schema = StructType([
+    StructField("label", StringType(), True),
+    StructField("score", FloatType(), True),
+    StructField("explanation", StringType(), True),
+])
+
+topics_schema = ArrayType(
+    StructType([
+        StructField("label", StringType(), True),
+        StructField("keywords", ArrayType(StringType()), True),
+        StructField("similarity", FloatType(), True)
+    ])
+)
+
+entity_schema = StructType([
+    StructField("name", StringType(), True),
+    StructField("type", StringType(), True),
+    StructField("description", StringType(), True)
+])
+
+LLM_CACHE = {}
 
 
-nlp_model = None
-sentiment_analyzer = None
-topic_modeler = None
-entity_analyzer = None
-llm_available = False
+def ensure_es_index():
+    from elasticsearch import Elasticsearch
 
-
-def load_spacy_model(model_name="ru_core_news_sm"):
-    """Loads or downloads the spaCy model."""
-    global nlp_model
-    if nlp_model is None:
-        try:
-            logger.info(f"Attempting to load spaCy model {model_name}...")
-            nlp_model = spacy.load(model_name)
-            logger.info(f"spaCy model {model_name} loaded.")
-        except OSError:
-            logger.warning(f"spaCy model {model_name} not found. Downloading...")
-            try:
-                spacy.cli.download(model_name)
-                nlp_model = spacy.load(model_name)
-                logger.info(f"spaCy model {model_name} downloaded and loaded.")
-            except Exception as e:
-                logger.error(f"Failed to download or load spaCy model {model_name}: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error loading spaCy model {model_name}: {e}")
-    return nlp_model
-
-def initialize_analysis_components(config):
-    """Initializes analysis components, intended to run on workers."""
-    global sentiment_analyzer, topic_modeler, entity_analyzer, llm_available, nlp_model
-
-    logger.info("Worker: Initializing analysis components...")
-
-    current_llm_available = config.get('llm_available', False) # Get availability from driver check
-    use_local_llm_config = config.get('use_local_llm', False)
-
-    nlp_instance = load_spacy_model()
-
-    #Sentiment Analyzer
+    ELASTICSEARCH_HOST_LOCAL = ELASTICSEARCH_HOST
     try:
-        if sentiment_analyzer is None:
-            sentiment_analyzer = SentimentAnalyzer(
-                use_local_llm=use_local_llm_config and current_llm_available,
-                local_llm_url=config.get('local_llm_url')
-            )
-            logger.info(f"Worker: SentimentAnalyzer initialized. LLM active: {sentiment_analyzer.llm_available}")
-    except Exception as e:
-        logger.error(f"Worker: Error initializing SentimentAnalyzer: {e}")
-        sentiment_analyzer = None # Ensure it's None on failure
+        es = Elasticsearch([{"host": ELASTICSEARCH_HOST_LOCAL, "port": int(ELASTICSEARCH_PORT), "scheme": "http"}])
+    except Exception:
+        es = Elasticsearch(f"http://{ELASTICSEARCH_HOST_LOCAL}:{ELASTICSEARCH_PORT}")
 
-    # Topic Modeler
-    try:
-        if topic_modeler is None:
-            topic_modeler = TopicModeler(
-                nlp=nlp_instance, # Use the loaded spaCy model
-                mongodb_uri=config.get('mongodb_uri'),
-                llm_url=config.get('local_llm_url') if use_local_llm_config else None,
-                use_local_llm=True
-            )
-            model_info = topic_modeler.get_model_info()
-            logger.info(f"Worker: TopicModeler initialized. LLM active: {model_info.get('llm_available', False)}")
-    except Exception as e:
-        logger.error(f"Worker: Error initializing TopicModeler: {e}")
-        logger.error(traceback.format_exc())
-        topic_modeler = None
+    index = ELASTICSEARCH_NEWS_INDEX
 
-
-    # Entity Mention Analyzer
-    try:
-        if entity_analyzer is None and config.get('postgres_uri'):
-            import psycopg2 # Import locally as it might not be needed everywhere
-            postgres_conn = None
-            try:
-                postgres_conn = psycopg2.connect(config['postgres_uri'])
-                entity_analyzer = EntityMentionAnalyzer(
-                    postgres_connection=postgres_conn, # Pass the connection
-                    sentiment_analyzer=sentiment_analyzer, # Use initialized analyzer
-                    use_local_llm=use_local_llm_config and current_llm_available,
-                    local_llm_url=config.get('local_llm_url')
-                )
-                # Note: The connection should ideally be managed carefully.
-                # Creating one per partition might be okay for low frequency,
-                # but a pool might be better for high throughput.
-                # For simplicity here, we create one. It will be closed when the worker process exits.
-                logger.info("Worker: EntityMentionAnalyzer initialized with PostgreSQL connection.")
-            except ImportError:
-                 logger.warning("Worker: psycopg2 not installed. Cannot initialize EntityMentionAnalyzer.")
-                 entity_analyzer = None
-            except Exception as e:
-                logger.warning(f"Worker: Failed to initialize EntityMentionAnalyzer with PostgreSQL: {e}")
-                if postgres_conn:
-                    postgres_conn.close() # Close connection if init failed
-                entity_analyzer = None
-        elif not config.get('postgres_uri'):
-            logger.info("Worker: POSTGRES_URI not set, skipping EntityMentionAnalyzer initialization.")
-            entity_analyzer = None
-
-    except Exception as e:
-        logger.error(f"Worker: Error during EntityMentionAnalyzer setup: {e}")
-        entity_analyzer = None
-
-    logger.info("Worker: Analysis components initialization complete.")
-
-
-def check_llm_availability(url):
-    """Checks local LLM availability with retries."""
-    if not url:
-        logger.warning("LOCAL_LLM_URL is not set, cannot check.")
-        return False
-    
-    max_attempts = 3
-    for attempt in range(max_attempts):
-        try:
-            logger.info(f"Checking Local LLM availability at {url} (attempt {attempt+1}/{max_attempts})")
-            
-            # Сначала проверяем /health
-            health_response = requests.get(f"{url.split('/generate')[0]}/health", timeout=10)
-            if health_response.status_code != 200:
-                logger.warning(f"LLM health check failed with status {health_response.status_code}")
-                time.sleep(5)
-                continue
-                
-            health_data = health_response.json()
-            if not health_data.get("model_ready", False):
-                logger.info("LLM service is running but model is not ready yet")
-                time.sleep(10)
-                continue
-                
-            # Затем делаем тестовый запрос
-            response = requests.post(
-                url, 
-                json={"prompt": "Привет", "max_tokens": 5},
-                timeout=240
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                if "error" in result and result["error"]:
-                    logger.warning(f"LLM test returned error: {result['error']}")
-                else:
-                    logger.info("LLM test request successful!")
-                    return True
-            else:
-                logger.warning(f"LLM test returned status code {response.status_code}")
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"LLM connection attempt {attempt+1} failed: {e}")
-        
-        # Не ждем перед последней попыткой
-        if attempt < max_attempts - 1:
-            logger.info(f"Waiting 15s before next LLM availability check...")
-            time.sleep(15)
-    
-    logger.error("All LLM connection attempts failed")
-    return False
-
-
-
-
-# --- Main Processing Function for mapInPandas ---
-import json # Add json import at the top
-
-def process_partition_pandas(iterator: iter, config_broadcast) -> iter:
-    """
-    Processes partitions using Pandas UDF (mapInPandas).
-    Initializes models once per worker process handling partitions.
-    Applies sentiment, topic, entity extraction.
-    RETURNS COMPLEX FIELDS AS JSON STRINGS.
-
-    Args:
-        iterator: An iterator of Pandas DataFrames.
-        config_broadcast: A Spark broadcast variable holding configuration.
-
-    Yields:
-        An iterator of processed Pandas DataFrames matching intermediate_map_output_schema.
-    """
-    config = config_broadcast.value
-    initialize_analysis_components(config) # Keep this as is
-
-    sa = sentiment_analyzer
-    tm = topic_modeler
-    ea = entity_analyzer
-    current_llm_available = config.get('llm_available', False)
-    use_local_llm_config = config.get('use_local_llm', False)
-
-    # --- Analysis functions now return Python dicts/lists ---
-    def safe_analyze_sentiment(text):
-        if not sa or not text or not isinstance(text, str):
-            return None # Return None for easier JSON handling
-        try:
-            use_llm_for_this = use_local_llm_config and current_llm_available and (hash(text) % 5 == 0)
-            result = sa.analyze(text, use_llm=use_llm_for_this)
-            return {
-                "label": result.get("label", "neutral"),
-                "score": float(result.get("score", 0.5)),
-                "method": result.get("method", "unknown"),
-                "explanation": result.get("explanation", "")[:500]
-            }
-        except Exception as e:
-            logger.error(f"Error in sentiment analysis for text '{str(text)[:50]}...': {e}")
-            # Return None or an error dict that can be serialized
-            return {"label": "error", "score": 0.0, "method": "udf_exception", "explanation": str(e)[:100]}
-
-    def safe_get_topics(text):
-        # ... (previous logic, returning list of dicts) ...
-        if not tm or not text or not isinstance(text, str) or len(text) < 50:
-            return None # Return None for easier JSON handling
-        try:
-            topics = tm.get_topics(text)
-            return [{
-                "label": t.get("label", ""),
-                "keywords": t.get("keywords", []),
-                "entities": t.get("entities", []),
-                "similarity": float(t.get("similarity", 0.0))
-            } for t in topics[:5]]
-        except Exception as e:
-            logger.error(f"Error in topic extraction for text '{str(text)[:50]}...': {e}")
-            return None # Return None on error
-
-    def safe_extract_main_entity(text):
-        # ... (previous logic, returning dict or None) ...
-        if not tm or not text or not isinstance(text, str) or len(text) < 30:
-            return None
-        try:
-            entity_dict = tm.extract_main_entity(text)
-            if entity_dict:
-                return {
-                    "name": entity_dict.get("name", ""),
-                    "type": entity_dict.get("type", ""),
-                    "description": entity_dict.get("description", "")[:500],
-                    "method": entity_dict.get("method", "")
-                }
-            return None
-        except Exception as e:
-            logger.error(f"Error in main entity extraction for text '{str(text)[:50]}...': {e}")
-            return None # Return None on error
-
-    def safe_find_entity_mentions(row_dict):
-        # ... (previous logic, returning list of dicts) ...
-        if not ea or not row_dict:
-            return None
-        try:
-            mentions = ea.find_entity_mentions(row_dict)
-            return [{
-                "entity_id": m.get("entity_id", ""),
-                "entity_name": m.get("entity_name", ""),
+    mapping = {
+        "mappings": {
+            "properties": {
+                "id":           { "type": "keyword" },
+                "text":         { "type": "text" },
+                "channel_id":   { "type": "keyword" },
+                "channel_name": { "type": "keyword" },
+                "date":         { "type": "date", "format": "yyyy-MM-dd'T'HH:mm:ss||strict_date_optional_time||epoch_millis" },
+                "views":        { "type": "integer" },
+                "forwards":     { "type": "integer" },
+                "has_media":    { "type": "keyword" },
                 "sentiment": {
-                    "label": m.get("sentiment", {}).get("label", "neutral"),
-                    "score": float(m.get("sentiment", {}).get("score", 0.5)),
-                    "method": m.get("sentiment", {}).get("method", "unknown"),
-                    "explanation": m.get("sentiment", {}).get("explanation", "")[:500]
-                }
-            } for m in mentions[:10]]
-        except Exception as e:
-            logger.error(f"Error finding entity mentions: {e}")
-            return None
-
-
-    # Function to safely serialize Python objects to JSON strings
-    def safe_json_dumps(obj):
-        if obj is None:
-            return None
-        try:
-            return json.dumps(obj, ensure_ascii=False) # ensure_ascii=False for non-Latin chars
-        except Exception as e:
-            logger.warning(f"Could not serialize object to JSON: {e}. Object: {str(obj)[:100]}")
-            return None
-
-    # Process each Pandas DataFrame chunk
-    for pdf in iterator:
-        # Apply analysis functions (they return Python dicts/lists/None)
-        sentiment_results = pdf['text'].apply(safe_analyze_sentiment)
-        topics_results = pdf['text'].apply(safe_get_topics)
-        main_entity_results = pdf['text'].apply(safe_extract_main_entity)
-
-        # Apply entity mentions row-wise
-        entity_mentions_results = []
-        if ea:
-             for index, row in pdf.iterrows():
-                 message_context_dict = {
-                     "id": row.get("id"), "text": row.get("text"),
-                     "channel_id": row.get("channel_id"), "timestamp": str(row.get("date"))
-                 }
-                 entity_mentions_results.append(safe_find_entity_mentions(message_context_dict))
-        else:
-             entity_mentions_results = [None for _ in range(len(pdf))]
-
-        # --- Serialize results to JSON strings in new columns ---
-        pdf['sentiment_json'] = sentiment_results.apply(safe_json_dumps)
-        pdf['topics_json'] = topics_results.apply(safe_json_dumps)
-        pdf['main_entity_json'] = main_entity_results.apply(safe_json_dumps)
-        pdf['entity_mentions_json'] = pd.Series(entity_mentions_results).apply(safe_json_dumps) # Convert list to Series
-
-        # --- Add other columns ---
-        pdf['text_length'] = pdf['text'].apply(lambda x: len(x) if isinstance(x, str) else 0)
-        pdf['processing_time'] = pd.Timestamp.utcnow()
-
-        # --- Select columns matching intermediate_map_output_schema ---
-        # Ensure base columns are present (they should be from the input iterator)
-        # Add the new string and basic columns
-        required_cols = [f.name for f in intermediate_map_output_schema]
-        # Create default values for any potentially missing output columns
-        for col_name in required_cols:
-             if col_name not in pdf.columns:
-                 pdf[col_name] = None # Or appropriate default
-
-        # Important: Ensure Timestamps are compatible with Arrow if they are returned
-        pdf['date'] = pd.to_datetime(pdf['date'])
-        pdf['kafka_timestamp'] = pd.to_datetime(pdf['kafka_timestamp'])
-        pdf['processing_time'] = pd.to_datetime(pdf['processing_time'])
-
-        # Yield the DataFrame with JSON string columns
-        yield pdf[required_cols]
-
-
-# Class NewsProcessor remains primarily for Initialization & Utility on Driver
-class NewsProcessor:
-    def __init__(self, spark_context):
-        logger.info("Initializing News Processor on Driver")
-        self.spark_context = spark_context
-
-        # Store config to be broadcasted
-        self.config = {
-            "use_local_llm": USE_LOCAL_LLM,
-            "local_llm_url": LOCAL_LLM_URL,
-            "mongodb_uri": MONGODB_URI,
-            "mongodb_db": MONGODB_DB,
-            "postgres_uri": POSTGRES_URI,
-            "elasticsearch_host": ELASTICSEARCH_HOST,
-            "elasticsearch_port": ELASTICSEARCH_PORT,
-            "sentiment_cache_limit": SENTIMENT_CACHE_LIMIT,
-            "topic_cache_limit": TOPIC_CACHE_LIMIT
-        }
-
-        # Check LLM availability on Driver (will be passed in config)
-        self.config['llm_available'] = check_llm_availability(LOCAL_LLM_URL) if USE_LOCAL_LLM else False
-        logger.info(f"Driver: LLM Availability Check: {self.config['llm_available']}")
-
-        # Broadcast the configuration dictionary
-        self.config_broadcast = self.spark_context.broadcast(self.config)
-        logger.info("Configuration broadcasted to workers.")
-
-        # Initialize components needed *only* on the Driver (e.g., ES/Mongo clients for specific actions)
-        self.es = connect_to_elasticsearch(
-            ELASTICSEARCH_HOST, ELASTICSEARCH_PORT, MAX_RETRIES, RETRY_DELAY, CONNECTION_TIMEOUT
-        )
-        self._setup_elasticsearch_indices()
-
-        self.mongodb_client, self.mongodb_db = None, None
-        if MONGODB_URI and MONGODB_DB:
-            try:
-                self.mongodb_client, self.mongodb_db = connect_to_mongodb(MONGODB_URI, MONGODB_DB)
-                logger.info("Driver: Connected to MongoDB for metrics/updates.")
-            except Exception as e:
-                logger.error(f"Driver: Failed to connect to MongoDB: {e}")
-        else:
-            logger.warning("Driver: MongoDB URI/DB not set, metrics/updates disabled.")
-
-        # We don't initialize the heavy NLP components here anymore.
-        # They are initialized on workers via initialize_analysis_components.
-
-        logger.info("NewsProcessor initialized on Driver.")
-
-
-    def _setup_elasticsearch_indices(self):
-        """Create Elasticsearch indices if they don't exist (runs on Driver)."""
-        if not self.es:
-            logger.error("Elasticsearch connection not available on Driver. Cannot setup indices.")
-            return
-        # --- Mapping for News Index ---
-        # Use the final_output_schema (+ ES specific settings) to define mapping
-        # (Simplified version - Adapt based on actual analysis needs)
-        news_index_mapping = {
-            "properties": {
-                "id": {"type": "keyword"},
-                "channel_id": {"type": "keyword"},
-                "channel_name": {
-                    "type": "text", "analyzer": "russian_analyzer",
-                    "fields": {"keyword": {"type": "keyword"}}
-                },
-                "date": {"type": "date"},
-                "text": {"type": "text", "analyzer": "russian_analyzer"},
-                "has_media": {"type": "boolean"},
-                "views": {"type": "integer"},
-                "forwards": {"type": "integer"},
-                "kafka_timestamp": {"type": "date"},
-                "processing_time": {"type": "date"},
-                "text_length": {"type": "integer"},
-                "sentiment": { # Object based on sentiment_schema
                     "properties": {
-                        "label": {"type": "keyword"},
-                        "score": {"type": "float"},
-                        "method": {"type": "keyword"},
-                        "explanation": {"type": "text", "index": False}
+                        "label":       { "type": "keyword" },
+                        "score":       { "type": "float" },
+                        "explanation": { "type": "text" }
                     }
                 },
-                "topics": { # Nested based on topic_schema
+                "topics": {
                     "type": "nested",
                     "properties": {
-                        "label": {"type": "keyword"},
-                        "keywords": {"type": "keyword"},
-                        "entities": {"type": "keyword"},
-                        "similarity": {"type": "float"}
+                        "label":      { "type": "keyword" },
+                        "keywords":   { "type": "keyword" },
+                        "similarity": { "type": "float" }
                     }
                 },
-                "main_entity": { # Object based on entity_schema
+                "main_entity": {
                     "properties": {
-                        "name": {"type": "keyword"},
-                        "type": {"type": "keyword"},
-                        "description": {"type": "text", "index": False},
-                        "method": {"type": "keyword"}
+                        "name":        { "type": "keyword" },
+                        "type":        { "type": "keyword" },
+                        "description": { "type": "text" }
                     }
                 },
-                "entity_mentions": { # Nested based on entity_mention_schema
+                "entity_mentions": {
                     "type": "nested",
                     "properties": {
-                        "entity_id": {"type": "keyword"},
-                        "entity_name": {"type": "keyword"},
-                        "sentiment": { # Reusing sentiment properties
-                            "properties": {
-                                "label": {"type": "keyword"},
-                                "score": {"type": "float"},
-                                "method": {"type": "keyword"},
-                                "explanation": {"type": "text", "index": False}
-                            }
-                        }
+                        "entity_name": { "type": "keyword" },
+                        "offset":      { "type": "integer" }
                     }
                 }
             }
         }
-        # Simplified Settings (reuse from original code)
-        news_index_settings = {
-            "number_of_shards": 1, "number_of_replicas": 0,
-            "analysis": {
-                 "analyzer": {"russian_analyzer": {"type": "custom", "tokenizer": "standard", "filter": ["lowercase", "russian_stop", "russian_stemmer"]}},
-                 "filter": {"russian_stop": {"type": "stop", "stopwords": "_russian_"}, "russian_stemmer": {"type": "stemmer", "language": "russian"}}
-             }
-        }
-        # --- Mapping for Metrics Index --- (Reuse from original code)
-        metrics_index_mapping = {
-            "properties": {
-                "channel_name": {"type": "keyword"},
-                "window_start": {"type": "date"},
-                "window_end": {"type": "date"},
-                "hourly_sentiment": {"type": "float"},
-                "message_count": {"type": "integer"},
-                "hourly_topics": {"type": "keyword"},
-                "main_entities": {"type": "keyword"}
-            }
-        }
-        metrics_index_settings = {"number_of_shards": 1, "number_of_replicas": 0}
+    }
+    if not es.indices.exists(index=index):
+        es.indices.create(index=index, body=mapping)
+        logger.info(f"Создан индекс {index} в Elasticsearch")
+    else:
+        logger.info(f"Индекс {index} уже существует")
 
-        # --- Create Indices --- (Reuse logic from original code)
-        indices_to_create = {
-            ELASTICSEARCH_NEWS_INDEX: (news_index_settings, news_index_mapping),
-            ELASTICSEARCH_METRICS_INDEX: (metrics_index_settings, metrics_index_mapping)
-        }
-        for index_name, (settings, mapping) in indices_to_create.items():
-            try:
-                if not self.es.indices.exists(index=index_name):
-                    self.es.indices.create(index=index_name, settings=settings, mappings=mapping)
-                    logger.info(f"Driver: Created Elasticsearch index: {index_name}")
-                else:
-                    logger.info(f"Driver: Elasticsearch index {index_name} already exists.")
-                    # Optional: Add mapping update logic here if needed (be cautious)
-            except Exception as e:
-                logger.error(f"Driver: Failed to create/check Elasticsearch index {index_name}: {e}")
-                # Decide if this is fatal
 
-    def _log_analysis_metrics(self, batch_df, batch_id):
-        """Логирование метрик в MongoDB (выполняется на драйвере в foreachBatch)"""
-        if self.mongodb_db is None:
-            logger.debug(f"Metrics Batch {batch_id}: MongoDB not available, skipping metrics logging.")
-            return
-
+def safe_first_json_obj(text):
+    """
+    Извлекает самый первый JSON-объект ({...}) из текста, даже если текст содержит что-то до/после.
+    Возвращает dict или empty dict.
+    """
+    match = re.search(r'\{[\s\S]*?\}', text)
+    if match:
         try:
-            start_time = time.time()
-            # --- Collect stats from the batch ---
-            # Note: Collecting can be expensive. Consider sampling or approximate counts.
-            message_count = batch_df.count()
-            if message_count == 0:
-                logger.debug(f"Metrics Batch {batch_id}: Empty batch, skipping metrics.")
-                return
-
-            sentiment_counts = batch_df.groupBy("sentiment.label").count().collect()
-            sentiment_distribution = {row["label"]: row["count"] for row in sentiment_counts if row["label"]}
-
-            # Topic distribution (requires exploding potentially nested data)
-            topic_dist_df = batch_df.select(explode_outer(col("topics")).alias("topic_info")) \
-                                     .groupBy("topic_info.label") \
-                                     .agg(count("*").alias("count")) \
-                                     .filter(col("label").isNotNull())
-            topic_distribution = {row["label"]: row["count"] for row in topic_dist_df.collect()}
-
-            # --- Prepare metrics documents ---
-            # Note: Getting real-time stats (cache hits, LLM calls) from workers is complex.
-            # These metrics reflect только distribution within the batch.
-            # We can log the config used.
-            llm_used_in_config = self.config.get('use_local_llm') and self.config.get('llm_available')
-
-            processing_time = time.time() - start_time
-
-            metrics_doc = {
-                 "batch_id": batch_id,
-                 "timestamp": datetime.utcnow(),
-                 "message_count": message_count,
-                 "sentiment_distribution": sentiment_distribution,
-                 "topic_distribution_batch": topic_distribution,
-                 "llm_available_in_config": self.config.get('llm_available'),
-                 "llm_used_in_config": llm_used_in_config,
-                 "metrics_collection_time_sec": processing_time
-             }
-
-            self.mongodb_db.analysis_metrics.insert_one(metrics_doc)
-            logger.info(f"Metrics Batch {batch_id}: Logged analysis metrics ({message_count} msgs)")
-
-            # --- Cache Clearing Logic (Needs adaptation) ---
-            # Clearing caches based on stats collected *remotely* in workers is hard.
-            # Simplification: Could clear based on driver-side counts or time intervals if needed,
-            # but it wouldn't directly correspond to worker cache sizes.
-            # Or, implement cache size check *within* worker functions (process_partition_pandas)
-            # and trigger clearing there based on local worker state (complex).
-            # Let's skip complex cache clearing for now.
-
+            return json.loads(match.group(0))
         except Exception as e:
-            logger.error(f"Metrics Batch {batch_id}: Error logging analysis metrics: {e}")
-            logger.error(traceback.format_exc())
+            logger.warning(f"Error parsing JSON from LLM: {e}. Raw={match.group(0)[:100]}")
+    return {}
 
+def safe_first_json_array(text):
+    """
+    Извлекает JSON-массив ([{...}]) из текста.
+    Возвращает list (list-of-dict) или пустой список
+    """
+    match = re.search(r'\[\s*\{[\s\S]*?\}\s*\]', text)
+    if match:
+        try:
+            arr = json.loads(match.group(0))
+            if isinstance(arr, list):
+                arr = [x for x in arr if isinstance(x, dict)]
+                return arr
+        except Exception as e:
+            logger.warning(f"Error parsing JSON array from LLM: {e}. Raw={match.group(0)[:100]}")
+    return []
 
-# --- Helper: Create Spark Session ---
-def create_spark_session():
-    logger.info("Creating Spark session")
-    mongo_pkg = "org.mongodb.spark:mongo-spark-connector_2.12:3.0.1" # Check Spark/Scala compatibility
-    # Or try latest compatible: "org.mongodb.spark:mongo-spark-connector_2.12:10.2.1" for Spark 3.4+
-
-    return SparkSession.builder \
-        .appName("NewsFeedProcessor") \
-        .config("spark.jars.packages",
-            f"org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1," # Use Spark 3.4.1 packages if running Spark 3.4.1
-            f"org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0," # Keep ES connector compatible
-            f"{mongo_pkg}") \
-        .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
-        .config("spark.driver.memory", DRIVER_MEMORY) \
-        .config("spark.executor.memory", EXECUTOR_MEMORY) \
-        .config("spark.sql.streaming.checkpointLocation", CHECKPOINT_BASE_DIR) \
-        .config("spark.sql.shuffle.partitions", os.cpu_count() * 2) \
-        .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
-        .config("spark.kryoserializer.buffer.max", "1024m") \
-        .getOrCreate()
-
-
-# --- Helper: Read from Kafka ---
-def read_from_kafka(spark):
-    logger.info(f"Setting up Kafka stream reader for topic: {KAFKA_TOPIC}")
+def run_async_in_thread(async_func, *args, **kwargs):
+    """Запускает асинхронную функцию в отдельном потоке executor'а"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    nest_asyncio.apply(loop)
     try:
-        df = spark.readStream \
-            .format("kafka") \
-            .option("kafka.bootstrap.servers", KAFKA_BROKERS) \
-            .option("subscribe", KAFKA_TOPIC) \
-            .option("startingOffsets", "latest") \
-            .option("failOnDataLoss", "false") \
-            .option("kafka.group.id", "telegram-news-processor-group") \
-            .load()
-        logger.info("Kafka stream reader configured.")
-        return df
-    except Exception as e:
-        logger.error(f"Failed to configure Kafka stream reader: {e}")
-        raise
+        return loop.run_until_complete(async_func(*args, **kwargs))
+    finally:
+        loop.close()
 
-# --- Helper: Write to Elasticsearch (using foreachBatch - reusable) ---
-def write_to_elasticsearch_custom(df, index_name, id_field="id", checkpoint_suffix=""):
-    """Writes DataFrame to Elasticsearch using foreachBatch."""
-    es_options = {
-        "es.resource": index_name,
-        "es.nodes": ELASTICSEARCH_HOST,
-        "es.port": ELASTICSEARCH_PORT,
-        "es.nodes.wan.only": "true",
-        "es.write.operation": "upsert" if id_field else "index",
-        "es.mapping.id": id_field if id_field else None,
-        "es.batch.size.bytes": "5mb", # Tune batch size
-        "es.batch.size.entries": "1000"
-    }
-    if not es_options["es.mapping.id"]: del es_options["es.mapping.id"]
-
-    checkpoint_path = f"{CHECKPOINT_BASE_DIR}/es_{index_name.replace('/', '_')}_{checkpoint_suffix}"
-    logger.info(f"Setting up ES writer: index={index_name}, checkpoint={checkpoint_path}, id_field={id_field}")
-
-    def process_batch(batch_df, batch_id):
-        start_time = time.time()
+async def async_llm_request(url, payload, timeout=CONNECTION_TIMEOUT):
+    """Асинхронно отправляет запрос к LLM-сервису"""
+    import aiohttp
+    
+    for attempt in range(MAX_RETRIES):
         try:
-            # Coalesce small batches to avoid too many small writes
-            # batch_df = batch_df.repartition(1) # Careful: adds a shuffle
-            count = batch_df.count() # Action to trigger computation and get count
-            if count > 0:
-                logger.info(f"ES Batch {batch_id}: Writing {count} records to index {index_name}")
-                # Ensure schema matches ES mapping before writing; Spark should handle basic types
-                batch_df.write \
-                    .format("org.elasticsearch.spark.sql") \
-                    .options(**es_options) \
-                    .mode("append") \
-                    .save()
-                elapsed = time.time() - start_time
-                logger.info(f"ES Batch {batch_id}: Wrote {count} records to {index_name} in {elapsed:.2f}s")
-            else:
-                logger.debug(f"ES Batch {batch_id}: Empty batch for {index_name}, skipping.")
-        except Exception as e:
-            logger.error(f"ES Batch {batch_id}: Error writing to ES index {index_name}: {e}")
-            logger.error(traceback.format_exc())
-            # Consider adding failed batch to DLQ
-
-    return df.writeStream \
-        .foreachBatch(process_batch) \
-        .option("checkpointLocation", checkpoint_path) \
-        .start()
-
-
-# --- Helper: Write to MongoDB (using foreachBatch - reusable) ---
-def write_to_mongodb_custom(df, collection_name, checkpoint_suffix="", upsert_key=None):
-    """Writes DataFrame to MongoDB using foreachBatch and pymongo."""
-    checkpoint_path = f"{CHECKPOINT_BASE_DIR}/mongo_{collection_name}_{checkpoint_suffix}"
-    logger.info(f"Setting up MongoDB writer: coll={collection_name}, checkpoint={checkpoint_path}, upsert_key={upsert_key}")
-
-    def process_batch(batch_df, batch_id):
-        start_time = time.time()
-        if not MONGODB_URI or not MONGODB_DB:
-            logger.warning(f"Mongo Batch {batch_id}: MongoDB not configured, skipping write to {collection_name}.")
-            return
-
-        try:
-            # Persist the batch to avoid recomputation if count fails
-            batch_df = batch_df.persist()
-            count = batch_df.count()
-            if count > 0:
-                logger.info(f"Mongo Batch {batch_id}: Processing {count} records for collection {collection_name}")
-                # Collect data to driver - potentially dangerous for large batches!
-                # Consider mapPartitions with pymongo if batches are too large for driver.
-                rows_json = batch_df.toJSON().collect()
-                documents = [json.loads(row) for row in rows_json]
-
-                client = None
-                try:
-                    # Establish connection within batch - pooling is recommended for prod
-                    client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=15000)
-                    db = client[MONGODB_DB]
-                    collection = db[collection_name]
-
-                    from pymongo import UpdateOne # Import pymongo operation
-
-                    operations = []
-                    for doc in documents:
-                        # Convert date strings back to datetime if needed by Mongo
-                        # (Spark's toJSON might stringify them)
-                        # Example: if 'window_start' in doc and isinstance(doc['window_start'], str):
-                        #             doc['window_start'] = datetime.fromisoformat(doc['window_start'].replace('Z', '+00:00'))
-
-                        if upsert_key and upsert_key in doc and doc[upsert_key] is not None:
-                            filter_criteria = {upsert_key: doc[upsert_key]}
-                            operations.append(UpdateOne(filter_criteria, {"$set": doc}, upsert=True))
-                        elif "id" in doc and doc["id"] is not None: # Default upsert on "id"
-                            operations.append(UpdateOne({"id": doc["id"]}, {"$set": doc}, upsert=True))
-                        else: # Fallback to insert if no key
-                             operations.append(UpdateOne({"_id": doc.get("id", None)}, {"$set": doc}, upsert=True)) # Try upserting on _id=id
-
-                    if operations:
-                        result = collection.bulk_write(operations, ordered=False)
-                        elapsed = time.time() - start_time
-                        logger.info(f"Mongo Batch {batch_id}: Wrote {result.upserted_count + result.modified_count}/{len(documents)} docs "
-                                    f"to {collection_name} in {elapsed:.2f}s "
-                                    f"(Upserted: {result.upserted_count}, Modified: {result.modified_count})")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=timeout) as response:
+                    if response.status == 200:
+                        resp_data = await response.json()
+                        return resp_data.get("generated_text", resp_data.get("text", ""))
                     else:
-                         logger.info(f"Mongo Batch {batch_id}: No valid documents/operations for {collection_name}.")
-
-                except pymongo_errors.ConnectionFailure as ce:
-                    logger.error(f"Mongo Batch {batch_id}: Connection failure to MongoDB ({MONGODB_URI}): {ce}")
-                except pymongo_errors.BulkWriteError as bwe:
-                    logger.error(f"Mongo Batch {batch_id}: Bulk write error to MongoDB collection {collection_name}: {bwe.details}")
-                except Exception as e:
-                    logger.error(f"Mongo Batch {batch_id}: Error writing to MongoDB collection {collection_name}: {e}")
-                    logger.error(traceback.format_exc())
-                finally:
-                    if client: client.close()
-            else:
-                logger.debug(f"Mongo Batch {batch_id}: Empty batch for {collection_name}, skipping.")
+                        logger.warning(f"Ошибка API, статус: {response.status}, URL: {url}")
         except Exception as e:
-            logger.error(f"Mongo Batch {batch_id}: Error processing batch for MongoDB: {e}")
-            logger.error(traceback.format_exc())
-        finally:
-             batch_df.unpersist() # Release persisted RDD
+            logger.warning(f"Ошибка запроса к {url}: {str(e)}")
+        
+        if attempt < MAX_RETRIES - 1:
+            await asyncio.sleep(RETRY_DELAY)
+    
+    return None
+async def parallel_llm_requests(text):
+    """Параллельно выполняет запросы к трем LLM-сервисам"""
 
-
-    return df.writeStream \
-        .foreachBatch(process_batch) \
-        .option("checkpointLocation", checkpoint_path) \
-        .start()
-
-
-# --- Specific Writer for Processed News with Mention Storage (using foreachBatch) ---
-def write_processed_data_with_mentions(df, news_processor, mongo_msg_collection="messages", mongo_mention_collection="entity_mentions", es_index=ELASTICSEARCH_NEWS_INDEX):
-    """Writes processed data to ES and MongoDB messages, and extracts/writes mentions separately."""
-    checkpoint_path = f"{CHECKPOINT_BASE_DIR}/processed_news_combined"
-    logger.info(f"Setting up combined writer: ES={es_index}, MongoMsg={mongo_msg_collection}, MongoMention={mongo_mention_collection}, checkpoint={checkpoint_path}")
-
-    # Driver-side connections needed for logging/updates inside foreachBatch
-    es_host = news_processor.config['elasticsearch_host']
-    es_port = news_processor.config['elasticsearch_port']
-    mongo_available = news_processor.mongodb_db is not None
-
-    es_options = {
-        "es.resource": es_index, "es.nodes": es_host, "es.port": es_port,
-        "es.nodes.wan.only": "true", "es.write.operation": "upsert", "es.mapping.id": "id",
-        "es.batch.size.bytes": "5mb", "es.batch.size.entries": "1000"
-    }
-
-    def process_batch(batch_df, batch_id):
-        start_time = time.time()
-        if not news_processor:
-            logger.error(f"Combined Batch {batch_id}: NewsProcessor instance unavailable.")
-            return
-
-        try:
-            # Persist to avoid recomputing DataFrame multiple times
-            batch_df = batch_df.persist()
-            count = batch_df.count()
-
-            if count > 0:
-                logger.info(f"Combined Batch {batch_id}: Processing {count} records for ES/{es_index}, Mongo/{mongo_msg_collection}, Mentions/{mongo_mention_collection}")
-
-                # --- 1. Log Analysis Metrics (on Driver) ---
-                news_processor._log_analysis_metrics(batch_df, batch_id)
-
-                # --- 2. Write to Elasticsearch ---
-                try:
-                    # Select columns matching ES mapping (should be covered by final_output_schema)
-                    batch_df.select([f.name for f in final_output_schema]).write \
-                        .format("org.elasticsearch.spark.sql") \
-                        .options(**es_options) \
-                        .mode("append") \
-                        .save()
-                    logger.info(f"Combined Batch {batch_id}: Wrote {count} records to Elasticsearch index {es_index}")
-                except Exception as es_e:
-                    logger.error(f"Combined Batch {batch_id}: Error writing to Elasticsearch: {es_e}")
-                    # Log only, continue processing
-
-                # --- 3. Write Main Messages to MongoDB ---
-                if mongo_available:
-                    client = None
-                    try:
-                        # Select necessary columns for the main message document
-                        # Convert to JSON strings, then parse back to dicts
-                        rows_json = batch_df.select([f.name for f in final_output_schema]).toJSON().collect()
-                        documents = [json.loads(row) for row in rows_json]
-
-                        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=15000)
-                        db = client[MONGODB_DB]
-                        collection = db[mongo_msg_collection]
-                        from pymongo import UpdateOne
-
-                        operations = []
-                        for doc in documents:
-                            if "id" in doc and doc["id"]:
-                                # Optionally clean up dates if needed
-                                # if 'date' in doc and isinstance(doc['date'], str): doc['date'] = datetime.fromisoformat(...)
-                                operations.append(UpdateOne({"id": doc["id"]}, {"$set": doc}, upsert=True))
-
-                        if operations:
-                            result = collection.bulk_write(operations, ordered=False)
-                            logger.info(f"Combined Batch {batch_id}: Wrote {result.upserted_count + result.modified_count}/{len(documents)} messages to MongoDB {mongo_msg_collection}")
-                        else:
-                            logger.info(f"Combined Batch {batch_id}: No valid messages found for MongoDB {mongo_msg_collection}")
-
-                    except Exception as mongo_e:
-                        logger.error(f"Combined Batch {batch_id}: Error writing main messages to MongoDB {mongo_msg_collection}: {mongo_e}")
-                    finally:
-                        if client: client.close()
-                else:
-                    logger.debug(f"Combined Batch {batch_id}: MongoDB unavailable, skipping write to {mongo_msg_collection}")
-
-                # --- 4. Extract and Write Entity Mentions ---
-                if mongo_available:
-                    client = None
-                    mention_docs_to_insert = []
-                    try:
-                        # Select only message ID and the already extracted entity mentions array
-                        # entity_mentions column should already contain list of dicts matching schema
-                        mention_data = batch_df.select("id", "entity_mentions") \
-                                              .filter(col("entity_mentions").isNotNull() & (size(col("entity_mentions")) > 0)) \
-                                              .collect() # Collect to driver
-
-                        if mention_data:
-                             processing_ts = datetime.utcnow()
-                             for row in mention_data:
-                                 message_id = row.id
-                                 mentions = row.entity_mentions # This is Array[Struct] -> List[Row] -> List[Dict] hopefully
-                                 for mention_dict in mentions: # Iterate through the list of mention dicts
-                                     if isinstance(mention_dict, Row): mention_dict = mention_dict.asDict(recursive=True) # Convert Row to dict if needed
-
-                                     # Basic validation
-                                     if not mention_dict or not mention_dict.get('entity_id'): continue
-
-                                     mention_doc = {
-                                         "_id": f"{message_id}_{mention_dict.get('entity_id')}_{mention_dict.get('entity_name', '')[:10]}", # Create a unique ID
-                                         "message_id": message_id,
-                                         "entity_id": mention_dict.get("entity_id"),
-                                         "entity_name": mention_dict.get("entity_name"),
-                                         "sentiment_label": mention_dict.get("sentiment", {}).get("label"),
-                                         "sentiment_score": mention_dict.get("sentiment", {}).get("score"),
-                                         "sentiment_method": mention_dict.get("sentiment", {}).get("method"),
-                                         # "sentiment_explanation": mention_dict.get("sentiment", {}).get("explanation"), # Keep explanation?
-                                         "processing_timestamp": processing_ts
-                                     }
-                                     mention_docs_to_insert.append(UpdateOne(
-                                        {"_id": mention_doc["_id"]},
-                                        {"$set": mention_doc},
-                                        upsert=True
-                                     ))
-
-
-                        if mention_docs_to_insert:
-                            client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=15000)
-                            db = client[MONGODB_DB]
-                            mention_collection = db[mongo_mention_collection]
-                            result = mention_collection.bulk_write(mention_docs_to_insert, ordered=False)
-                            logger.info(f"Combined Batch {batch_id}: Upserted {result.upserted_count + result.modified_count}/{len(mention_docs_to_insert)} entity mentions to MongoDB {mongo_mention_collection}")
-                        else:
-                            logger.info(f"Combined Batch {batch_id}: No entity mentions found in this batch.")
-
-                    except Exception as mention_e:
-                        logger.error(f"Combined Batch {batch_id}: Error writing entity mentions to MongoDB: {mention_e}")
-                        logger.error(traceback.format_exc())
-                    finally:
-                        if client: client.close()
-                else:
-                     logger.debug(f"Combined Batch {batch_id}: MongoDB unavailable, skipping mention storage.")
-
-                elapsed = time.time() - start_time
-                logger.info(f"Combined Batch {batch_id}: Finished processing {count} records in {elapsed:.2f}s.")
-
-            else:
-                logger.debug(f"Combined Batch {batch_id}: Empty batch, skipping.")
-
-        except Exception as e:
-            logger.error(f"Combined Batch {batch_id}: Error processing combined batch: {e}")
-            logger.error(traceback.format_exc())
-        finally:
-            batch_df.unpersist() # Release memory
-
-    return df.writeStream \
-        .foreachBatch(process_batch) \
-        .option("checkpointLocation", checkpoint_path) \
-        .start()
-
-
-# --- Main Data Processing Logic ---
-def process_data(df, config_broadcast):
-    """Parses Kafka messages, applies enrichments using mapInPandas (returning JSON strings),
-       and then parses JSON strings back to complex Spark types."""
-    logger.info("Applying processing steps using mapInPandas and JSON serialization")
-
-    # --- 1. Parse JSON from Kafka ---
-    parsed_df = df.select(
-        col("key").cast("string"),
-        col("timestamp").alias("kafka_timestamp"),
-        from_json(col("value").cast("string"), message_schema).alias("data")
-    ).select("key", "kafka_timestamp", "data.*")
-
-    parsed_df = parsed_df.filter(col("id").isNotNull() & (col("text").isNotNull()))
-
-    # Define input columns for mapInPandas (ensure all needed fields are selected)
-    input_df_for_map = parsed_df.select(
-        "id", "channel_id", "channel_name", "date", "text",
-        "views", "forwards", "has_media", "kafka_timestamp"
-    )
-
-
-    # --- 2. Apply Enrichments using mapInPandas (returns JSON strings) ---
-    intermediate_df = input_df_for_map.mapInPandas(
-        lambda iterator: process_partition_pandas(iterator, config_broadcast),
-        schema=intermediate_map_output_schema
-    )
-
-    final_df = intermediate_df \
-        .withColumn("sentiment", from_json(col("sentiment_json"), sentiment_schema)) \
-        .withColumn("topics", from_json(col("topics_json"), topics_array_schema)) \
-        .withColumn("main_entity", from_json(col("main_entity_json"), entity_schema)) \
-        .withColumn("entity_mentions", from_json(col("entity_mentions_json"), entity_mentions_array_schema)) \
-        .withColumn("has_media", col("has_media").cast(BooleanType())) # Cast boolean here
-
-    final_processed_df = final_df.select(
-         "id", "channel_id", "channel_name", "date", "text", "text_length",
-         "sentiment", "topics", "main_entity", "entity_mentions",
-         "views", "forwards", "has_media",
-         "processing_time", "kafka_timestamp"
-    )
-
-
-    logger.info("Data processing steps configured (mapInPandas + from_json).")
-    return final_processed_df
-
-
-
-# --- Calculate Channel Metrics --- (Reuse logic from original code, minor adjustments)
-def calculate_hourly_channel_metrics(processed_df):
-    """Calculates hourly metrics per channel using Spark SQL aggregations."""
-    logger.info("Configuring hourly channel metrics calculation")
-
-    # 1. Explode the topics.label array to get individual topic labels
-    exploded_df = processed_df.select(
-        "*",
-        explode_outer(col("topics.label")).alias("topic_label")
-    )
-
-    windowed_df = exploded_df \
-        .withWatermark("date", "1 hour") \
-        .groupBy(
-            window(col("date"), "1 hour", "1 hour"),
-            col("channel_name")
+    if not USE_LIGHTWEIGHT_LLM:
+        return (
+            json.dumps({"label": "neutral", "score": 0.5, "explanation": "LLM отключен"}, ensure_ascii=False),
+            json.dumps([{"label": "Общество", "keywords": [], "similarity": 0.7}], ensure_ascii=False),
+            json.dumps({"name": "", "type": "", "description": ""}, ensure_ascii=False)
+        )
+    
+    if not text or len(text) < 20:
+        return (
+            json.dumps({"label": "neutral", "score": 0.5, "explanation": "Short text"}, ensure_ascii=False),
+            json.dumps([{"label": "Общество", "keywords": [], "similarity": 0.7}], ensure_ascii=False),
+            json.dumps({"name": "", "type": "", "description": ""}, ensure_ascii=False)
         )
 
-    hourly_metrics = windowed_df.agg(
-        avg(col("sentiment.score")).alias("hourly_sentiment"),
-        count("*").alias("message_count"),
-        collect_set(col("topic_label")).alias("distinct_topic_labels"),
-        collect_set(col("main_entity.name")).alias("distinct_entity_names")
-    )
+    cache_key = hashlib.md5(text.encode("utf-8")).hexdigest()
+    if cache_key in LLM_CACHE:
+        return LLM_CACHE[cache_key]
 
-    # 4. Clean up and finalize the DataFrame
-    hourly_metrics_flat = hourly_metrics.select(
-        col("channel_name"),
-        col("window.start").alias("window_start"),
-        col("window.end").alias("window_end"),
-        col("hourly_sentiment"),
-        col("message_count"),
-        col("distinct_topic_labels"),  # Already filtered for non-nulls
-        col("distinct_entity_names")   # Same here
-    ).filter(col("channel_name").isNotNull())
+    sentiment_prompt = f"""
+        You are a helpful assistant for Russian news analysis.
+        Analyze the sentiment of this news and reply with a SINGLE valid JSON.
+        
+        Example response:
+        {{
+        "label": "positive",
+        "score": 0.9(This is the percentage of how sure you are that the text is positive/negative/neutral.),
+        "explanation": "good result"
+        }}
 
-    logger.info("Hourly channel metrics calculation configured.")
-    return hourly_metrics_flat
+        News: "{text[:400]}"
+    """
+    
+    topics_prompt = f"""
+        You are an intelligent news classifier.
+        Classify the MAIN TOPIC of this news.
+        
+        Reply ONLY with a JSON array containing ONE object.
 
+        Valid topics:
+        - Политика
+        - Экономика
+        - Происшествия
+        - Общество
+        - Технологии
+        - Спорт
+        - Культура
+        - Здоровье
+        - Наука
+        - Военные
+        - Знаменитости
+
+        Example:
+        [
+        {{
+            "label": "Общество",
+            "keywords": ["животные", "пес"],
+            "similarity": 0.9(This is the percentage of how sure you are that the text is positive/negative/neutral.)
+        }}
+        ]
+
+        News:
+        "{text[:600]}"
+    """
+    
+    entity_prompt = f"""
+        You are a precise information extractor.
+        Given a news fragment, extract the MAIN entity (person, organization, location, or event) it discusses.
+
+        Reply ONLY with ONE valid JSON object and NOTHING else — no markdown, no code, no lists.
+
+        Example:
+        {{
+        "name": "ООН",
+        "type": "ОРГАНИЗАЦИЯ",
+        "description": "Международная организация"
+        }}
+
+        News:
+        "{text}"
+    """
+
+    sentiment_payload = {
+        "prompt": sentiment_prompt,
+        "max_tokens": 120,
+        "temperature": 0.3
+    }
+    
+    topics_payload = {
+        "prompt": topics_prompt,
+        "max_tokens": 120,
+        "temperature": 0.3
+    }
+    
+    entity_payload = {
+        "prompt": entity_prompt,
+        "max_tokens": 120,
+        "temperature": 0.3
+    }
+
+    tasks = [
+        async_llm_request(LLM_SENTIMENT_URL, sentiment_payload),
+        async_llm_request(LLM_TOPICS_URL, topics_payload),
+        async_llm_request(LLM_ENTITY_URL, entity_payload)
+    ]
+    
+    responses = await asyncio.gather(*tasks)
+
+    sentiment_text, topics_text, entity_text = responses
+
+    if sentiment_text:
+        sentiment = process_sentiment_response(sentiment_text, text)
+    else:
+        sentiment = {"label": "neutral", "score": 0.5, "explanation": "Не удалось получить ответ от LLM"}
+
+    if topics_text:
+        topics = process_topics_response(topics_text, text)
+    else:
+        topics = [{"label": "-", "keywords": [], "similarity": 0.0}]
+
+    if entity_text:
+        entity = process_entity_response(entity_text, text)
+    else:
+        entity = {"name": "", "type": "", "description": ""}
+    
+    sentiment_json = json.dumps(sentiment, ensure_ascii=False)
+    topics_json = json.dumps(topics, ensure_ascii=False)
+    entity_json = json.dumps(entity, ensure_ascii=False)
+    
+    result = (sentiment_json, topics_json, entity_json)
+    LLM_CACHE[cache_key] = result
+    
+    return result
+
+def process_sentiment_response(response_text, original_text):
+    """Обрабатывает ответ для sentiment"""
+    sentiment = safe_first_json_obj(response_text)
+    if not isinstance(sentiment, dict) or "label" not in sentiment:
+        sentiment = {"label": "neutral", "score": 0.5, "explanation": "Failed to extract sentiment"}
+
+    label = sentiment.get("label", "").lower()
+    score = sentiment.get("score")
+    explanation = sentiment.get("explanation", "")
+
+    valid_labels = ["positive", "negative", "neutral"]
+    if label not in valid_labels:
+        lower_text = original_text.lower()
+        negative_words = ["ужас", "катастроф", "трагед", "авари", "гибел", "умер", "убит", "разруш", "обрушил", "напад", "конфликт", "дтп", "ранен", "пострадавш", "погиб"]
+        positive_words = ["успех", "радост", "побед", "достиж", "хорош", "прекрасн", "удач", "счаст", "любов"]
+        neg_count = sum(1 for word in negative_words if word in lower_text)
+        pos_count = sum(1 for word in positive_words if word in lower_text)
+        if neg_count > pos_count:
+            label = "negative"
+        elif pos_count > neg_count:
+            label = "positive"
+        else:
+            label = "neutral"
+
+    if not isinstance(score, (float, int)):
+        score = {"positive":0.75, "negative":0.25, "neutral":0.5}[label]
+    else:
+        score = float(score)
+        if label == "positive" and score < 0.55:
+            score = 0.7
+        elif label == "negative" and score > 0.45:
+            score = 0.3
+        elif label == "neutral" and (score < 0.4 or score > 0.6):
+            score = 0.5
+
+    if not explanation:
+        explanation = "Автоматическое определение тональности"
+
+    return {
+        "label": label,
+        "score": round(score, 3),
+        "explanation": explanation[:120]
+    }
+
+def process_topics_response(response_text, original_text):
+    """Обрабатывает ответ для topics"""
+    valid_labels = [
+        "Политика", "Экономика", "Происшествия", "Общество",
+        "Технологии", "Спорт", "Культура", "Здоровье",
+        "Наука", "Военные", "Знаменитости"
+    ]
+    
+    topics = safe_first_json_array(response_text)
+    corrected_topics = []
+    lower_text = original_text.lower()
+    
+    for topic in (topics if isinstance(topics, list) else []):
+        if not isinstance(topic, dict):
+            continue
+
+        label = topic.get("label", "")
+        if not label or label not in valid_labels:
+            found = None
+            for v in valid_labels:
+                if v.lower() in lower_text:
+                    found = v
+                    break
+            label = found if found else "Общество"
+
+        sim = topic.get("similarity", 0.7)
+        try:
+            sim = float(sim)
+        except Exception:
+            sim = 0.7
+        if sim <= 0 or sim > 1:
+            sim = 0.7
+
+        keywords = topic.get("keywords", [])
+        if not isinstance(keywords, list):
+            keywords = []
+        corrected_topics.append({"label": label, "keywords": keywords, "similarity": sim})
+
+    if not corrected_topics:
+        corrected_topics.append({"label": "Общество", "keywords": [], "similarity": 0.7})
+    
+    return corrected_topics
+
+def process_entity_response(response_text, original_text):
+    """Обрабатывает ответ для entity"""
+    entity = safe_first_json_obj(response_text)
+    if not isinstance(entity, dict):
+        entity = {}
+
+    name = entity.get("name", "")
+    if name:
+        name = re.sub(r'[^\w\s\-.,а-яА-ЯёЁ]', '', name).strip()
+        if not name:
+            words = re.findall(r'[А-Я][а-яА-Я\-]+', original_text)
+            name = words[0] if words else ""
+    else:
+        name = ""
+    
+    valid_types = {"ЧЕЛОВЕК", "ОРГАНИЗАЦИЯ", "МЕСТО", "СОБЫТИЕ"}
+    eng_to_rus = {
+        "PERSON": "ЧЕЛОВЕК",
+        "ORGANIZATION": "ОРГАНИЗАЦИЯ",
+        "LOCATION": "МЕСТО",
+        "EVENT": "СОБЫТИЕ"
+    }
+    etype = entity.get("type", "").upper()
+    etype = eng_to_rus.get(etype, etype)
+    if etype not in valid_types:
+        if name:
+            if any(name.lower().endswith(x) for x in ["виль", "град", "бург", "ск", "ово", "ино"]):
+                etype = "МЕСТО"
+            elif name.isupper():
+                etype = "ОРГАНИЗАЦИЯ"
+            else:
+                etype = "ЧЕЛОВЕК"
+        else:
+            etype = ""
+    
+    description = entity.get("description", "")
+    if not description and name:
+        description = "Упоминается в новости"
+    
+    return {
+        "name": name,
+        "type": etype,
+        "description": description[:100] if description else ""
+    }
+
+
+def llm_sentiment(text):
+    """UDF для получения sentiment из LLM"""
+    results = run_async_in_thread(partial(parallel_llm_requests, text))
+    return results[0]
+
+def llm_topics(text):
+    """UDF для получения topics из LLM"""
+    results = run_async_in_thread(partial(parallel_llm_requests, text))
+    return results[1]
+
+
+def llm_entity(text):
+    """UDF для получения entity из LLM"""
+    results = run_async_in_thread(partial(parallel_llm_requests, text))
+    return results[2]
+
+async def async_check_llm_services():
+    """Асинхронно проверяет доступность всех LLM-сервисов"""
+    import aiohttp
+    
+    services = [
+        {"name": "Sentiment LLM", "url": LLM_SENTIMENT_URL},
+        {"name": "Topics LLM", "url": LLM_TOPICS_URL},
+        {"name": "Entity LLM", "url": LLM_ENTITY_URL}
+    ]
+    
+    all_available = True
+    
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for service in services:
+            health_url = service["url"].replace("/generate", "/health")
+            tasks.append(check_service(session, service, health_url))
+        
+        results = await asyncio.gather(*tasks)
+        all_available = all(results)
+    
+    if not all_available:
+        logger.warning("Некоторые LLM-сервисы недоступны. Проверьте конфигурацию.")
+    
+    return all_available
+
+async def check_service(session, service, health_url):
+    """Проверяет доступность одного сервиса"""
+    try:
+        async with session.get(health_url, timeout=3) as response:
+            if response.status == 200:
+                logger.info(f"Сервис {service['name']} доступен по URL {service['url']}")
+                return True
+            else:
+                logger.error(f"Сервис {service['name']} недоступен, статус: {response.status}")
+                return False
+    except Exception as e:
+        logger.error(f"Ошибка при проверке сервиса {service['name']}: {str(e)}")
+        return False
+
+def check_llm_services():
+    """Синхронная обертка для проверки сервисов"""
+    return run_async_in_thread(async_check_llm_services)
+    
+def write_to_mongo(batch_df, _):
+    """Записывает пакет данных в MongoDB с обработкой дубликатов"""
+    try:
+        import pandas as pd
+        from datetime import datetime
+
+        rows = batch_df.collect()
+        pdf = pd.DataFrame([row.asDict() for row in rows])
+
+        def convert_datetime(obj):
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            elif isinstance(obj, dict):
+                return {k: convert_datetime(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [convert_datetime(x) for x in obj]
+            return obj
+
+        for col in pdf.columns:
+            if pd.api.types.is_datetime64_any_dtype(pdf[col]):
+                pdf[col] = pdf[col].apply(
+                    lambda x: x.isoformat() if pd.notnull(x) else None
+                )
+
+        records = []
+        for record in pdf.to_dict('records'):
+            try:
+                record = convert_datetime(record)
+                record = {k: v for k, v in record.items() if v is not None}
+                records.append(record)
+            except Exception as e:
+                logger.warning(f"Ошибка обработки записи: {str(e)[:200]}")
+
+        if not records:
+            logger.info("Нет записей для записи в MongoDB")
+            return
+        
+
+        mongo = MongoClient(MONGODB_URI)
+        db = mongo[MONGODB_DB]
+        collection = db.messages
+
+
+        try:
+            collection.create_index(
+                [("id", ASCENDING), ("channel_id", ASCENDING)],
+                unique=True,
+                name="message_id_channel_id_idx"
+            )
+        except Exception as e:
+            logger.debug(f"Индекс уже существует или ошибка создания: {str(e)}")
+
+        batch_size = 100
+        total_processed = 0
+        
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i + batch_size]
+            operations = []
+            
+            for record in batch:
+                filter_doc = {
+                    "message_id": record.get('id'),
+                    "channel_id": record.get('channel_id')
+                } if record.get('id') and record.get('channel_id') else {
+                    "text_hash": record.get('text_hash', 
+                        hashlib.md5(str(record.get('text', '')).encode()).hexdigest()),
+                    "channel_id": record.get('channel_id', ''),
+                    "date": record.get('date', '')
+                }
+                
+                operations.append(UpdateOne(
+                    filter_doc,
+                    {"$set": record},
+                    upsert=True
+                ))
+
+            if operations:
+                collection.bulk_write(operations, ordered=False)
+                total_processed += len(operations)
+                logger.debug(f"Обработано {len(operations)} записей (всего: {total_processed})")
+
+        logger.info(f"Успешно записано {total_processed} записей в MongoDB")
+
+    except Exception as e:
+        logger.error(f"Критическая ошибка при записи в MongoDB: {str(e)}")
 
 
 def main():
-    logger.info("---- Starting News Feed Processor Application ----")
-    spark = None
-    try:
-        spark = create_spark_session()
-        spark.sparkContext.setLogLevel("WARN")
-        logger.info("Spark session created.")
-        logger.info(f"Spark Config: {spark.sparkContext.getConf().getAll()}")
+    check_llm_services()
+    
+    sentiment_udf = udf(llm_sentiment, StringType())
+    topics_udf = udf(llm_topics, StringType())
+    entity_udf = udf(llm_entity, StringType())
 
-        news_processor = NewsProcessor(spark.sparkContext)
-        logger.info("NewsProcessor (Driver part) initialized successfully.")
+    logger.info("Инициализация Spark для обработки новостей Telegram")
+    
+    spark = SparkSession.builder \
+        .appName("NewsFeedProcessor") \
+        .config("spark.jars.packages",
+            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1," 
+            "org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0," 
+            "org.mongodb.spark:mongo-spark-connector_2.12:3.0.1") \
+        .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
+        .config("spark.driver.memory", DRIVER_MEMORY) \
+        .config("spark.executor.memory", EXECUTOR_MEMORY) \
+        .config("spark.sql.streaming.checkpointLocation", CHECKPOINT_DIR) \
+        .config("spark.sql.shuffle.partitions", os.cpu_count() * 2) \
+        .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
+        .config("spark.kryoserializer.buffer.max", "1024m") \
+        .config("spark.streaming.kafka.consumer.poll.ms", "2000") \
+        .config("spark.streaming.backpressure.enabled", "true") \
+        .getOrCreate()
+    spark.sparkContext.setLogLevel("WARN")
+    
+    logger.info(f"Настройка чтения из Kafka топика {KAFKA_TOPIC}")
 
+    df = spark.readStream.format("kafka") \
+        .option("kafka.bootstrap.servers", KAFKA_BROKERS) \
+        .option("subscribe", KAFKA_TOPIC) \
+        .option("startingOffsets", "latest") \
+        .option("failOnDataLoss", "false") \
+        .load()
 
-        kafka_df = read_from_kafka(spark)
+    parsed = df.select(
+        from_json(col("value").cast("string"), message_schema).alias("data")
+    ).select("data.*")
 
-        processed_df = process_data(kafka_df, news_processor.config_broadcast)
+    logger.info("Настройка обогащения данных тональностью, темами и сущностями")
+    
+    enriched = parsed.filter(col("id").isNotNull() & (length(col("text")) > 5)) \
+        .withColumn("sentiment_json", sentiment_udf(col("text"))) \
+        .withColumn("topics_json", topics_udf(col("text"))) \
+        .withColumn("entity_json", entity_udf(col("text")))
 
-        news_write_query = write_processed_data_with_mentions(
-            processed_df,
-            news_processor,
-            mongo_msg_collection="messages",
-            mongo_mention_collection="entity_mentions",
-            es_index=ELASTICSEARCH_NEWS_INDEX
-        )
-        logger.info("Started stream writing processed data (ES, Mongo Msg, Mongo Mention).")
+    enriched = enriched \
+        .withColumn("sentiment", from_json(col("sentiment_json"), sentiment_schema)) \
+        .withColumn("topics", from_json(col("topics_json"), topics_schema)) \
+        .withColumn("main_entity", from_json(col("entity_json"), entity_schema))
 
-        hourly_metrics_df = calculate_hourly_channel_metrics(processed_df)
+    logger.info(f"Настройка записи в Elasticsearch: {ELASTICSEARCH_HOST}:{ELASTICSEARCH_PORT}/{ELASTICSEARCH_NEWS_INDEX}")
+    
+    es_query = enriched.writeStream \
+        .format("org.elasticsearch.spark.sql") \
+        .option("es.resource", f"{ELASTICSEARCH_NEWS_INDEX}/_doc") \
+        .option("es.nodes", ELASTICSEARCH_HOST) \
+        .option("es.port", ELASTICSEARCH_PORT) \
+        .option("es.batch.size.entries", "1000") \
+        .option("checkpointLocation", f"{CHECKPOINT_DIR}/es") \
+        .outputMode("append") \
+        .trigger(processingTime="10 seconds") \
+        .start()
 
-        write_to_elasticsearch_custom(
-            hourly_metrics_df,
-            ELASTICSEARCH_METRICS_INDEX,
-            id_field=None,
-            checkpoint_suffix="metrics_es"
-        )
-        logger.info("Started stream writing hourly metrics to Elasticsearch.")
-        logger.info("All streaming queries started. Waiting for termination...")
-        news_write_query.awaitTermination()
+    logger.info(f"Настройка записи в MongoDB: {MONGODB_URI}/{MONGODB_DB}")
 
-    except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt received. Stopping streams...")
-    except Exception as e:
-        logger.error(f"An critical error occurred in the main processing loop: {e}")
-        logger.error(traceback.format_exc())
-    finally:
-        logger.info("---- Stopping Spark Session ----")
-        if spark:
-            active_streams = spark.streams.active
-            if active_streams:
-                 logger.info(f"Stopping {len(active_streams)} active streaming queries...")
-                 for query in active_streams:
-                    try:
-                        logger.info(f"Stopping query: {query.name} (ID: {query.id})")
-                        query.stop()
-                        query.awaitTermination(timeout=60)
-                        logger.info(f"Query {query.id} stopped.")
-                    except Exception as stop_e:
-                        logger.error(f"Error stopping query {query.id}: {stop_e}")
-            spark.stop()
-            logger.info("Spark session stopped.")
+    spark.conf.set("spark.sql.execution.arrow.enabled", "false")
 
+    mongo_query = enriched.writeStream \
+        .foreachBatch(write_to_mongo) \
+        .option("checkpointLocation", f"{CHECKPOINT_DIR}/mongo") \
+        .trigger(processingTime="15 seconds") \
+        .start()
+
+    logger.info("Запуск процессора. Ожидание данных...")
+    
+    es_query.awaitTermination()
+    mongo_query.awaitTermination()
 
 if __name__ == "__main__":
-    main()
+    try:
+        ensure_es_index()
+        main()
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}", exc_info=True)
+        raise

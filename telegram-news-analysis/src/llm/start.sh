@@ -25,4 +25,4 @@ export LLAMA_TIMEOUT
 # Запуск FastAPI
 echo "Starting FastAPI service on port 8000"
 echo "LLM server will be started automatically"
-exec python3 -m uvicorn server:app --host 0.0.0.0 --port 8000 --log-level info
+exec gunicorn -b 0.0.0.0:8000 server:app --log-level info

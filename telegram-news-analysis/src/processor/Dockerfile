@@ -20,14 +20,6 @@ RUN pip install --no-cache-dir --upgrade pip
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN python -m spacy download ru_core_news_sm
-
-RUN python -c "import nltk; nltk.download('punkt')" || true
-
-ENV TRANSFORMERS_CACHE=/app/hf_cache
-RUN mkdir -p $TRANSFORMERS_CACHE
-
-
 COPY . .
 
 CMD ["python", "news_processor.py"]

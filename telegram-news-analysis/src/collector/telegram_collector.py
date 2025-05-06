@@ -6,7 +6,6 @@ import os
 import json
 import traceback
 import signal
-import time
 
 from telethon import TelegramClient, events
 from telethon.tl.functions.channels import JoinChannelRequest
@@ -15,7 +14,6 @@ import asyncpg
 from confluent_kafka import Producer
 from confluent_kafka.admin import AdminClient, NewTopic
 import pymongo
-from bson import ObjectId
 
 # Настройка путей и API
 SESSION_PATH = '/app/sessions/telegram_news_session.session'
@@ -51,9 +49,9 @@ class Config:
     KAFKA_BATCH_SIZE = int(os.getenv("KAFKA_BATCH_SIZE", "1000"))
     
     # Application settings
-    CHANNEL_UPDATE_INTERVAL = int(os.getenv("CHANNEL_UPDATE_INTERVAL", "300"))  # seconds
+    CHANNEL_UPDATE_INTERVAL = int(os.getenv("CHANNEL_UPDATE_INTERVAL", "10"))
     MESSAGE_BATCH_SIZE = int(os.getenv("MESSAGE_BATCH_SIZE", "100"))
-    HEALTHCHECK_INTERVAL = int(os.getenv("HEALTHCHECK_INTERVAL", "180"))  # seconds
+    HEALTHCHECK_INTERVAL = int(os.getenv("HEALTHCHECK_INTERVAL", "180"))
     
     # New tables and collections
     TRACKED_ENTITIES_TABLE = "tracked_entities"
@@ -160,7 +158,7 @@ class TelegramNewsCollector:
         """Настройка подключения к PostgreSQL"""
         try:
             self.postgres_uri = config.get_postgres_uri()
-            self.postgres_pool = None  # Will be initialized in start()
+            self.postgres_pool = None
             self.logger.info(f"PostgreSQL URI configured")
         except Exception as e:
             self.logger.error(f"Failed to configure PostgreSQL URI: {e}")
@@ -529,7 +527,6 @@ class TelegramNewsCollector:
         except Exception as e:
             self.logger.error(f"Error preparing message data: {e}")
             self.logger.debug(traceback.format_exc())
-            # Return a minimal valid message to avoid further errors
             return {
                 "id": str(getattr(event.message, "id", "unknown")),
                 "message_id": getattr(event.message, "id", 0),
@@ -805,20 +802,20 @@ class TelegramNewsCollector:
                 break
             except Exception as e:
                 self.logger.error(f"Error in channel update task: {e}")
-                await asyncio.sleep(30)  # Shorter sleep on error
+                await asyncio.sleep(30)
 
     async def _periodic_entity_update(self):
         """Периодическое обновление списка отслеживаемых сущностей"""
         while self.running:
             try:
                 await self.update_tracked_entities()
-                await asyncio.sleep(300)  # Check every 5 minutes
+                await asyncio.sleep(10)
             except asyncio.CancelledError:
                 self.logger.info("Entity update task cancelled")
                 break
             except Exception as e:
                 self.logger.error(f"Error in entity update task: {e}")
-                await asyncio.sleep(60)  # Shorter sleep on error
+                await asyncio.sleep(60)
 
     async def _periodic_health_check(self):
         """Периодическая проверка состояния сервисов"""
@@ -831,7 +828,7 @@ class TelegramNewsCollector:
                 break
             except Exception as e:
                 self.logger.error(f"Error in health check task: {e}")
-                await asyncio.sleep(60)  # Shorter sleep on error
+                await asyncio.sleep(60)
 
     async def _join_channels(self, channels):
         """Присоединение к списку каналов"""
@@ -898,11 +895,12 @@ class TelegramNewsCollector:
             return False
             
         try:
-            if not await self.client.is_connected():
+            # Метод is_connected() не асинхронный, используем без await
+            if not self.client.is_connected():
                 self.logger.error("Telegram client is not connected")
                 # Attempt to reconnect
                 await self.client.connect()
-                if not await self.client.is_connected():
+                if not self.client.is_connected():  # Также без await здесь
                     return False
             
             # Try to actually use the connection
@@ -919,6 +917,7 @@ class TelegramNewsCollector:
             except Exception:
                 pass
             return False
+
 
     async def close_connections(self):
         """Безопасное закрытие всех соединений"""
@@ -938,7 +937,7 @@ class TelegramNewsCollector:
         try:
             if hasattr(self, 'kafka_producer'):
                 self.logger.info("Flushing Kafka producer...")
-                self.kafka_producer.flush(timeout=30)  # Wait up to 30 seconds
+                self.kafka_producer.flush(timeout=30)
                 self.logger.info("Kafka producer flushed")
         except Exception as e:
             self.logger.error(f"Error flushing Kafka producer: {e}")
@@ -982,7 +981,7 @@ class TelegramNewsCollector:
         """Закрытие соединения с Telegram"""
         if hasattr(self, 'client') and self.client:
             try:
-                if await self.client.is_connected():
+                if self.client.is_connected():  # Без await
                     await self.client.disconnect()
                     self.logger.info("Telegram client disconnected")
                 self.client = None
@@ -1009,8 +1008,7 @@ class TelegramNewsCollector:
         """Основной цикл работы с обработкой ошибок"""
         try:
             await self.start()
-            
-            # Main task is just waiting for signals or exceptions
+
             while self.running:
                 await asyncio.sleep(1)
                 
@@ -1058,7 +1056,7 @@ class TelegramNewsCollector:
                 "messages_last_24h": recent_messages,
                 "entity_mentions_last_24h": recent_mentions,
                 "top_channels": [{"channel": c["_id"], "messages": c["count"]} for c in top_channels],
-                "telegram_connected": self.client and await self.client.is_connected(),
+                "telegram_connected": self.client and self.client.is_connected(),
                 "kafka_enabled": hasattr(self, "kafka_producer"),
                 "running_since": self.start_time.isoformat() if hasattr(self, "start_time") else None
             }
@@ -1070,8 +1068,7 @@ class TelegramNewsCollector:
 async def main():
     """Точка входа в приложение"""
     collector = TelegramNewsCollector()
-    
-    # Handle shutdown signals properly
+
     loop = asyncio.get_running_loop()
     for signal_name in ('SIGINT', 'SIGTERM'):
         try:
@@ -1080,7 +1077,6 @@ async def main():
                 lambda: asyncio.create_task(collector.stop())
             )
         except (NotImplementedError, ImportError):
-            # Signals not supported on this platform
             pass
     
     try:

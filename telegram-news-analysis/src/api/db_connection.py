@@ -28,16 +28,13 @@ def wait_for_service(host, port, timeout=300):
 
 def connect_to_elasticsearch(host, port, max_retries=20, retry_delay=30, timeout=90):
     """Connect to Elasticsearch with robust retry logic"""
-    # First verify network connectivity
     if not wait_for_service(host, port):
         raise ConnectionError(f"Cannot establish network connection to {host}:{port}")
-    
-    # Now attempt connecting to Elasticsearch with a progressive backoff
+
     for attempt in range(max_retries):
         try:
             logger.info(f"Connecting to Elasticsearch {host}:{port}, attempt {attempt+1}/{max_retries}")
-            # Increase timeouts for initial connection attempts
-            current_timeout = timeout + (attempt * 10)  # Progressive timeout
+            current_timeout = timeout + (attempt * 10)
             
             es = Elasticsearch(
                 [f"http://{host}:{port}"],
@@ -45,10 +42,7 @@ def connect_to_elasticsearch(host, port, max_retries=20, retry_delay=30, timeout
                 max_retries=3,
                 retry_on_timeout=True
             )
-            
-            # First test with basic ping
             if es.ping(request_timeout=current_timeout):
-                # Then check cluster health
                 health = es.cluster.health(wait_for_status="yellow", timeout=f"{current_timeout}s")
                 if health.get("status") in ["yellow", "green"]:
                     logger.info(f"Successfully connected to Elasticsearch at {host}:{port}")
@@ -57,8 +51,6 @@ def connect_to_elasticsearch(host, port, max_retries=20, retry_delay=30, timeout
             logger.warning(f"Elasticsearch not ready on attempt {attempt+1}")
         except Exception as e:
             logger.warning(f"Elasticsearch connection attempt {attempt+1} failed: {str(e)}")
-        
-        # Calculate a progressive backoff
         current_delay = retry_delay * (1 + (attempt * 0.5))
         logger.info(f"Waiting {current_delay:.1f}s before next retry...")
         time.sleep(current_delay)
@@ -71,7 +63,7 @@ def connect_to_mongodb(uri, timeout=30000, max_attempts=5):
     """Connect to MongoDB with retry logic"""
     logger = logging.getLogger(__name__)
     host = uri.split("//")[1].split(":")[0]
-    port = 27017  # Default MongoDB port
+    port = 27017
     
     if not wait_for_service(host, port):
         raise ConnectionError(f"Cannot establish network connection to MongoDB at {host}:{port}")
@@ -80,9 +72,9 @@ def connect_to_mongodb(uri, timeout=30000, max_attempts=5):
         try:
             logger.info(f"Connecting to MongoDB {uri}, attempt {attempt+1}/{max_attempts}")
             client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=timeout)
-            client.server_info()  # This will raise an exception if cannot connect
+            client.server_info()
             logger.info(f"Successfully connected to MongoDB at {uri}")
-            return client  # Return just the client, not a tuple
+            return client
         except Exception as e:
             logger.warning(f"MongoDB connection attempt {attempt+1} failed: {str(e)}")
             if attempt < max_attempts - 1:
@@ -100,8 +92,6 @@ def create_postgres_connection_pool(host, port, dbname, user, password, min_conn
     for attempt in range(max_attempts):
         try:
             logger.info(f"Creating PostgreSQL connection pool for {user}@{host}:{port}/{dbname}, attempt {attempt+1}/{max_attempts}")
-            
-            # Create a threaded connection pool
             connection_pool = pool.ThreadedConnectionPool(
                 minconn=min_conn,
                 maxconn=max_conn,
@@ -112,15 +102,11 @@ def create_postgres_connection_pool(host, port, dbname, user, password, min_conn
                 password=password,
                 connect_timeout=timeout
             )
-            
-            # Test the connection pool by getting a connection
             conn = connection_pool.getconn()
             with conn.cursor() as cursor:
                 cursor.execute("SELECT 1")
                 result = cursor.fetchone()
                 assert result[0] == 1, "Test query failed"
-            
-            # Return the connection to the pool
             connection_pool.putconn(conn)
             
             logger.info(f"Successfully created PostgreSQL connection pool for {host}:{port}/{dbname}")

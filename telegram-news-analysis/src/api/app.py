@@ -46,9 +46,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Создание приложения Flask
+
 app = Flask(__name__)
-CORS(app, supports_credentials=True)  # Включение CORS для всех маршрутов с поддержкой credentials
+CORS(app, supports_credentials=True)
 
 # Добавляем конфигурацию приложения
 app.config.update(
@@ -60,8 +60,7 @@ app.config.update(
 # Инициализация соединений с базами данных
 def init_database_connections():
     logger.info("Initializing database connections")
-    
-    # Подключение к MongoDB
+
     try:
         app.mongo_client = connect_to_mongodb(MONGODB_URI)
         app.mongo_db = app.mongo_client[MONGODB_DB]
@@ -71,7 +70,6 @@ def init_database_connections():
         app.mongo_client = None
         app.mongo_db = None
     
-    # Создание пула соединений PostgreSQL
     try:
         app.pg_pool = create_postgres_connection_pool(
             host=POSTGRES_HOST,
@@ -267,7 +265,6 @@ def token_required(f):
                 'is_admin': user['is_admin'],
                 'is_active': user['is_active'],
                 'email': user['email'],
-                # Добавляем другие поля при необходимости
             }
             
             # Добавляем пользователя в объект request для совместимости
@@ -316,8 +313,7 @@ def health_check():
             'elasticsearch': {'status': 'unknown'}
         }
     }
-    
-    # Check PostgreSQL
+
     try:
         if hasattr(app, 'pg_pool') and app.pg_pool:
             manager = PostgresConnectionManager(app.pg_pool)
@@ -330,8 +326,7 @@ def health_check():
     except Exception as e:
         health['components']['postgres'] = {'status': 'error', 'message': str(e)}
         health['status'] = 'degraded'
-    
-    # Check MongoDB
+
     try:
         if hasattr(app, 'mongo_client') and app.mongo_client:
             app.mongo_client.admin.command('ping')
@@ -341,8 +336,7 @@ def health_check():
     except Exception as e:
         health['components']['mongodb'] = {'status': 'error', 'message': str(e)}
         health['status'] = 'degraded'
-    
-    # Check Elasticsearch
+
     try:
         if hasattr(app, 'elasticsearch') and app.elasticsearch:
             es_health = app.elasticsearch.cluster.health()
@@ -375,8 +369,7 @@ def register():
     
     if not username or not password:
         return jsonify({'message': 'Username and password are required'}), 400
-    
-    # Валидация данных
+
     if len(username) < 3:
         return jsonify({'message': 'Username must be at least 3 characters'}), 400
         
@@ -385,8 +378,7 @@ def register():
     
     if email and '@' not in email:
         return jsonify({'message': 'Invalid email format'}), 400
-    
-    # Хеширование пароля
+
     password_hash = hashlib.sha256(password.encode()).hexdigest()
     
     try:
@@ -413,8 +405,7 @@ def register():
                     (username, password_hash, email)
                 )
                 new_user_id = cur.fetchone()[0]
-                
-                # Создание записи с настройками пользователя
+
                 cur.execute(
                     "INSERT INTO user_settings (user_id) VALUES (%s)",
                     (new_user_id,)
@@ -505,7 +496,7 @@ def login():
                 'token',
                 token,
                 httponly=True,
-                secure=not DEBUG_MODE,  # Secure in production
+                secure=not DEBUG_MODE,
                 samesite='Strict',
                 expires=expiration
             )
@@ -549,11 +540,9 @@ def logout():
                 conn.commit()
         
         logger.info(f"User {g.user['username']} logged out")
-        
-        # Создаем ответ
+
         response = jsonify({'message': 'Logout successful'})
-        
-        # Удаляем cookie, если он был установлен
+
         response.set_cookie('token', '', expires=0)
         
         return response
@@ -681,5 +670,4 @@ if __name__ == '__main__':
     logger.info(f"Starting API server on {API_HOST}:{API_PORT} (Debug: {DEBUG_MODE})")
     app.run(host=API_HOST, port=API_PORT, debug=DEBUG_MODE)
 else:
-    # Для запуска через WSGI сервер
     init_app()

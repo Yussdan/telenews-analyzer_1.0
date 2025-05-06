@@ -3,8 +3,7 @@ import logging
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
 import traceback
-import json
-import os
+import time
 import requests
 
 logger = logging.getLogger(__name__)
@@ -50,10 +49,8 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             page = max(1, int(request.args.get('page', 1)))
             per_page = min(50, max(1, int(request.args.get('per_page', 10))))
             
-            # Build MongoDB filter query
             mongo_filter = {"channel_name": {"$in": user_channels}}
-            
-            # Optional date filter
+
             date_start = request.args.get('date_start')
             date_end = request.args.get('date_end')
             
@@ -72,26 +69,21 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             
             if date_filter:
                 mongo_filter["date"] = date_filter
-            
-            # Query MongoDB with pagination
+
             total = db.messages.count_documents(mongo_filter)
-            
-            # Handle sort options
+
             sort_field = request.args.get('sort_field', 'date')
-            sort_order = int(request.args.get('sort_order', -1))  # -1 for descending (newest first)
-            
-            # Ensure sort field is valid to prevent injection
+            sort_order = int(request.args.get('sort_order', -1))
+
             valid_sort_fields = ['date', 'views', 'forwards', 'created_at']
             if sort_field not in valid_sort_fields:
                 sort_field = 'date'
-            
-            # Fetch documents
+
             news = list(db.messages.find(
                 mongo_filter,
                 {'_id': 0}
             ).sort(sort_field, sort_order).skip((page-1)*per_page).limit(per_page))
-            
-            # Ensure date fields are serializable
+
             for item in news:
                 if 'date' in item and isinstance(item['date'], datetime):
                     item['date'] = item['date'].isoformat()
@@ -120,13 +112,11 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
         try:
             user_id = request.user.get('id')
             user_channels = get_filtered_query(user_id, pg_manager)
-            
-            # Validate and parse query parameters
+
             limit = min(50, max(1, int(request.args.get('limit', 10))))
             skip = max(0, int(request.args.get('skip', 0)))
             channel = request.args.get('channel')
-            
-            # Handle case with no channels
+
             if not user_channels:
                 return jsonify({
                     "warning": "No channels configured",
@@ -137,15 +127,13 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                 }), 200
             
             logger.debug(f"User {user_id} fetching latest news, channels: {user_channels}")
-            
-            # Построение запроса к Elasticsearch
+
             query = {
                 "sort": [{"date": {"order": "desc"}}],
                 "size": limit,
                 "from": skip
             }
-            
-            # Filter by channel if specified
+
             if channel:
                 if channel not in user_channels:
                     return jsonify({"error": "Channel not in user's channel list"}), 403
@@ -159,8 +147,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                 }
             else:
                 return jsonify({"error": "No channels available for this user"}), 403
-            
-            # Add date range filter if specified
+
             date_start = request.args.get('date_start')
             date_end = request.args.get('date_end')
             
@@ -170,10 +157,8 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     date_range["gte"] = date_start
                 if date_end:
                     date_range["lte"] = date_end
-                
-                # Add date range to query
+
                 if "query" in query:
-                    # Convert simple query to bool query
                     current_query = query["query"]
                     query["query"] = {
                         "bool": {
@@ -185,13 +170,11 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     }
                 else:
                     query["query"] = {"range": {"date": date_range}}
-            
-            # Check if Elasticsearch is available
+
             if not es:
                 logger.error("Elasticsearch connection not available")
                 return jsonify({"error": "Search service temporarily unavailable"}), 503
-            
-            # Execute the query with error handling
+
             try:
                 logger.debug(f"Elasticsearch query: {query}")
                 result = es.search(index=app.config['ELASTICSEARCH_INDEX'], body=query)
@@ -200,12 +183,10 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                 logger.error(f"Elasticsearch query failed: {e}")
                 logger.debug(traceback.format_exc())
                 return jsonify({"error": "Search request failed", "details": str(e)}), 500
-            
-            # Process and return results
+
             news = []
             for hit in result['hits']['hits']:
                 item = hit['_source']
-                # Add score if available
                 if '_score' in hit and hit['_score'] is not None:
                     item['relevance_score'] = hit['_score']
                 news.append(item)
@@ -239,8 +220,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             
             if not query_text:
                 return jsonify({"error": "Search query is required"}), 400
-            
-            # Check if user has any channels
+
             if not user_channels:
                 return jsonify({
                     "warning": "No channels configured",
@@ -248,8 +228,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     "total": 0,
                     "query": query_text
                 }), 200
-            
-            # Build the Elasticsearch query
+
             query = {
                 "query": {
                     "bool": {
@@ -284,8 +263,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                 "size": limit,
                 "from": skip
             }
-            
-            # Add date range if specified
+
             date_start = request.args.get('date_start')
             date_end = request.args.get('date_end')
             
@@ -297,8 +275,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     date_range["lte"] = date_end
                 
                 query["query"]["bool"]["must"].append({"range": {"date": date_range}})
-            
-            # Execute the search query
+
             if not es:
                 logger.error("Elasticsearch connection not available")
                 return jsonify({"error": "Search service temporarily unavailable"}), 503
@@ -309,14 +286,12 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                 logger.error(f"Elasticsearch search failed: {e}")
                 logger.debug(traceback.format_exc())
                 return jsonify({"error": "Search request failed", "details": str(e)}), 500
-            
-            # Process search results
+
             news = []
             for hit in result['hits']['hits']:
                 item = hit['_source']
                 item['score'] = hit['_score']
-                
-                # Add highlights if available
+
                 if 'highlight' in hit and 'text' in hit['highlight']:
                     item['highlights'] = hit['highlight']['text']
                 
@@ -346,8 +321,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             user_id = request.user.get('id')
             user_channels = get_filtered_query(user_id, pg_manager)
             time_period = request.args.get('period', '24h')
-            
-            # Handle case with no channels
+
             if not user_channels:
                 return jsonify({
                     "warning": "No channels configured",
@@ -359,19 +333,22 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     "period": time_period
                 }), 200
             
-            # Determine time range based on period
-            time_range_map = {
-                "1h": "now-1h",
-                "6h": "now-6h",
-                "12h": "now-12h",
-                "24h": "now-1d",
-                "7d": "now-7d",
-                "30d": "now-30d"
-            }
-            
-            time_range = time_range_map.get(time_period, "now-1d")
-            
-            # Build aggregation query
+            now = int(datetime.now().timestamp() * 1000)
+            if time_period == "1h":
+                start_time = now - (3600 * 1000)
+            elif time_period == "6h":
+                start_time = now - (6 * 3600 * 1000)
+            elif time_period == "12h":
+                start_time = now - (12 * 3600 * 1000)
+            elif time_period == "24h" or time_period == "1d":
+                start_time = now - (24 * 3600 * 1000)
+            elif time_period == "7d":
+                start_time = now - (7 * 24 * 3600 * 1000)
+            elif time_period == "30d":
+                start_time = now - (30 * 24 * 3600 * 1000)
+            else:
+                start_time = now - (24 * 3600 * 1000)
+
             query = {
                 "query": {
                     "bool": {
@@ -380,8 +357,8 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                             {
                                 "range": {
                                     "date": {
-                                        "gte": time_range,
-                                        "lte": "now"
+                                        "gte": start_time,
+                                        "lte": now
                                     }
                                 }
                             }
@@ -389,22 +366,12 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     }
                 },
                 "aggs": {
-                    "topics_nested": {
-                        "nested": {
-                            "path": "topics"
-                        },
-                        "aggs": {
-                            "topic_labels": {
-                                "terms": {
-                                    "field": "topics.label",
-                                    "size": 20
-                                }
-                            }
-                        }
+                    "topics": {
+                        "terms": {"field": "topics.label.keyword", "size": 20}
                     },
                     "main_entities": {
                         "terms": {
-                            "field": "main_entity.name",
+                            "field": "main_entity.name.keyword",
                             "size": 20,
                             "missing": "Unknown"
                         }
@@ -426,7 +393,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     },
                     "sentiment_distribution": {
                         "terms": {
-                            "field": "sentiment.label",
+                            "field": "sentiment.label.keyword",
                             "size": 5
                         }
                     },
@@ -438,15 +405,13 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                         }
                     }
                 },
-                "size": 0  # We only want aggregations, not documents
+                "size": 0
             }
-            
-            # Check if Elasticsearch is available
+
             if not es:
                 logger.error("Elasticsearch connection not available")
                 return jsonify({"error": "Analytics service temporarily unavailable"}), 503
-                
-            # Execute the query
+
             try:
                 logger.debug(f"Elasticsearch trends query: {query}")
                 result = es.search(index=app.config['ELASTICSEARCH_INDEX'], body=query)
@@ -455,33 +420,29 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                 logger.error(f"Elasticsearch aggregation failed: {e}")
                 logger.debug(traceback.format_exc())
                 return jsonify({"error": "Analytics request failed", "details": str(e)}), 500
-            
-            # Process the results
-            # Extract topics from nested aggregation
-            topics = []
-            if "topics_nested" in result["aggregations"]:
+
+            try:
                 topics = [
-                    {"topic": bucket["key"], "count": bucket["doc_count"]} 
-                    for bucket in result["aggregations"]["topics_nested"]["topic_labels"]["buckets"]
-                    if bucket["key"]  # Filter out empty keys
+                    {"topic": bucket["key"], "count": bucket["doc_count"]}
+                    for bucket in result["aggregations"]["topics"]["buckets"]
+                    if bucket["key"]
                 ]
-            
-            # Extract entities
+            except KeyError:
+                logger.warning("Topics aggregation not available in results")
+                topics = []
             entities = []
             if "main_entities" in result["aggregations"]:
                 entities = [
                     {"entity": bucket["key"], "count": bucket["doc_count"]} 
                     for bucket in result["aggregations"]["main_entities"]["buckets"]
-                    if bucket["key"] and bucket["key"] != "Unknown"  # Filter out empty and "Unknown" entities
+                    if bucket["key"] and bucket["key"] != "Unknown"
                 ]
-            
-            # Extract sentiment distribution
+
             sentiments = [
                 {"sentiment": bucket["key"], "count": bucket["doc_count"]} 
                 for bucket in result["aggregations"]["sentiment_distribution"]["buckets"]
             ]
-            
-            # Extract channel statistics
+
             channels = []
             for bucket in result["aggregations"]["channels"]["buckets"]:
                 channel_data = {
@@ -493,14 +454,12 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     ]
                 }
                 channels.append(channel_data)
-            
-            # Extract hourly activity
+
             hourly_activity = [
                 {"hour": time_bucket["key_as_string"], "count": time_bucket["doc_count"]}
                 for time_bucket in result["aggregations"]["hourly_activity"]["buckets"]
             ]
-            
-            # Log results for debugging
+
             logger.info(f"Topics found: {len(topics)}")
             logger.info(f"Entities found: {len(entities)}")
             logger.info(f"Sentiments found: {len(sentiments)}")
@@ -520,6 +479,145 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             logger.error(f"Error retrieving trends: {e}")
             logger.debug(traceback.format_exc())
             return jsonify({"error": "Failed to retrieve trends", "details": str(e)}), 500
+        
+    @app.route('/api/trends/topics', methods=['GET'])
+    @token_required
+    def get_trend_topics():
+        """Получение популярных тем"""
+        try:
+            user_id = request.user.get('id')
+            user_channels = get_filtered_query(user_id, pg_manager)
+            limit = min(50, max(1, int(request.args.get('limit', 20))))
+            period = request.args.get('period', '24h')
+
+            if not user_channels:
+                return jsonify({"topics": [], "message": "No channels configured"}), 200
+
+            now = int(datetime.now().timestamp() * 1000)
+            if period == "1h":
+                start_time = now - (3600 * 1000)
+            elif period == "6h":
+                start_time = now - (6 * 3600 * 1000)
+            elif period == "24h" or period == "1d":
+                start_time = now - (24 * 3600 * 1000)
+            elif period == "7d":
+                start_time = now - (7 * 24 * 3600 * 1000)
+            elif period == "30d":
+                start_time = now - (30 * 24 * 3600 * 1000)
+            else:
+                start_time = now - (24 * 3600 * 1000)
+
+            query = {
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"terms": {"channel_name.keyword": user_channels}},
+                            {"range": {"date": {"gte": start_time, "lte": now}}}
+                        ]
+                    }
+                },
+                "aggs": {
+                    "topics": {
+                        "terms": {
+                            "field": "topics.label.keyword",
+                            "size": limit
+                        }
+                    }
+                },
+                "size": 0
+            }
+
+            if not es:
+                return jsonify({"error": "Elasticsearch not available"}), 503
+
+            try:
+                result = es.search(index=app.config['ELASTICSEARCH_INDEX'], body=query)
+                topics = [
+                    {"topic": bucket["key"], "count": bucket["doc_count"]}
+                    for bucket in result["aggregations"]["topics"]["buckets"]
+                    if bucket["key"]
+                ]
+                return jsonify({"topics": topics, "period": period})
+            except Exception as e:
+                logger.error(f"Elasticsearch query failed: {e}")
+                return jsonify({"error": "Failed to retrieve topics"}), 500
+
+        except ValueError as e:
+            logger.warning(f"Invalid parameter value: {e}")
+            return jsonify({"error": f"Invalid parameter: {str(e)}"}), 400
+        except Exception as e:
+            logger.error(f"Error retrieving topics: {e}")
+            return jsonify({"error": "Failed to retrieve topics"}), 500
+
+    @app.route('/api/trends/entities', methods=['GET'])
+    @token_required
+    def get_trend_entities():
+        """Получение популярных сущностей"""
+        try:
+            user_id = request.user.get('id')
+            user_channels = get_filtered_query(user_id, pg_manager)
+            limit = min(50, max(1, int(request.args.get('limit', 30))))
+            period = request.args.get('period', '24h')
+
+            if not user_channels:
+                return jsonify({"entities": [], "message": "No channels configured"}), 200
+
+            now = int(datetime.now().timestamp() * 1000)
+            if period == "1h":
+                start_time = now - (3600 * 1000)
+            elif period == "6h":
+                start_time = now - (6 * 3600 * 1000)
+            elif period == "24h" or period == "1d":
+                start_time = now - (24 * 3600 * 1000)
+            elif period == "7d":
+                start_time = now - (7 * 24 * 3600 * 1000)
+            elif period == "30d":
+                start_time = now - (30 * 24 * 3600 * 1000)
+            else:
+                start_time = now - (24 * 3600 * 1000)
+
+            query = {
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"terms": {"channel_name.keyword": user_channels}},
+                            {"range": {"date": {"gte": start_time, "lte": now}}}
+                        ]
+                    }
+                },
+                "aggs": {
+                    "entities": {
+                        "terms": {
+                            "field": "main_entity.name.keyword",
+                            "size": limit,
+                            "missing": "Unknown"
+                        }
+                    }
+                },
+                "size": 0
+            }
+
+            if not es:
+                return jsonify({"error": "Elasticsearch not available"}), 503
+
+            try:
+                result = es.search(index=app.config['ELASTICSEARCH_INDEX'], body=query)
+                entities = [
+                    {"entity": bucket["key"], "count": bucket["doc_count"]}
+                    for bucket in result["aggregations"]["entities"]["buckets"]
+                    if bucket["key"] and bucket["key"] != "Unknown"
+                ]
+                return jsonify({"entities": entities, "period": period})
+            except Exception as e:
+                logger.error(f"Elasticsearch query failed: {e}")
+                return jsonify({"error": "Failed to retrieve entities"}), 500
+
+        except ValueError as e:
+            logger.warning(f"Invalid parameter value: {e}")
+            return jsonify({"error": f"Invalid parameter: {str(e)}"}), 400
+        except Exception as e:
+            logger.error(f"Error retrieving entities: {e}")
+            return jsonify({"error": "Failed to retrieve entities"}), 500
     
     @app.route('/api/reports/generate', methods=['POST'])
     @token_required
@@ -532,44 +630,45 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             if not data:
                 return jsonify({"error": "No data provided"}), 400
                 
-            report_type = data.get('type', 'entity')  # entity или topic
+            report_type = data.get('type', 'entity')
             entity_or_topic = data.get('entity_or_topic')
-            time_period = data.get('period', '7d')  # Период времени для анализа
+            time_period = data.get('period', '7d')
             
             if not entity_or_topic:
                 return jsonify({"error": "Entity or topic name is required"}), 400
-                
-            # Получить список каналов пользователя
+
             user_channels = get_filtered_query(user_id, pg_manager)
             
-            # Определение временного диапазона
-            time_range_map = {
-                "1d": "now-1d",
-                "7d": "now-7d",
-                "30d": "now-30d",
-                "90d": "now-90d"
-            }
-            time_range = time_range_map.get(time_period, "now-7d")
-            
-            # Построить Elasticsearch запрос для получения релевантных новостей
+            now = int(datetime.now().timestamp() * 1000)
+            if time_period == "1h":
+                start_time = now - (3600 * 1000)
+            elif time_period == "6h":
+                start_time = now - (6 * 3600 * 1000)
+            elif time_period == "12h":
+                start_time = now - (12 * 3600 * 1000)
+            elif time_period == "24h" or time_period == "1d":
+                start_time = now - (24 * 3600 * 1000)
+            elif time_period == "7d":
+                start_time = now - (7 * 24 * 3600 * 1000)
+            elif time_period == "30d":
+                start_time = now - (30 * 24 * 3600 * 1000)
+            else:
+                start_time = now - (24 * 3600 * 1000)
+
+            base_conditions = [
+                {"terms": {"channel_name.keyword": user_channels}},
+                {"range": {"date": {"gte": start_time, "lte": now}}},
+            ]
+
             if report_type == 'entity':
-                # Запрос для сущности (используем несколько способов поиска)
                 query = {
                     "query": {
                         "bool": {
-                            "must": [
-                                {"terms": {"channel_name.keyword": user_channels}},
-                                {"range": {"date": {"gte": time_range, "lte": "now"}}},
-                            ],
+                            "must": base_conditions,
                             "should": [
-                                {"match": {"main_entity.name": entity_or_topic}},
-                                {"match": {"text": entity_or_topic}},  # Искать также в тексте
-                                {"nested": {
-                                    "path": "entity_mentions",
-                                    "query": {
-                                        "match": {"entity_mentions.entity_name": entity_or_topic}
-                                    }
-                                }}
+                                {"match": {"main_entity.name.keyword": entity_or_topic}},
+                                {"match_phrase": {"text": entity_or_topic}},
+                                {"match": {"entity_mentions.entity_name.keyword": entity_or_topic}}
                             ],
                             "minimum_should_match": 1
                         }
@@ -578,24 +677,13 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     "size": 20
                 }
             else:
-                # Запрос для темы (используем и nested запрос и обычный поиск)
                 query = {
                     "query": {
                         "bool": {
-                            "must": [
-                                {"terms": {"channel_name.keyword": user_channels}},
-                                {"range": {"date": {"gte": time_range, "lte": "now"}}},
-                            ],
+                            "must": base_conditions,
                             "should": [
-                                {
-                                    "nested": {
-                                        "path": "topics",
-                                        "query": {
-                                            "match": {"topics.label": entity_or_topic}
-                                        }
-                                    }
-                                },
-                                {"match": {"text": entity_or_topic}}  # Искать также в тексте
+                                {"match": {"topics.label.keyword": entity_or_topic}},
+                                {"match_phrase": {"text": entity_or_topic}}
                             ],
                             "minimum_should_match": 1
                         }
@@ -603,120 +691,219 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     "sort": [{"date": {"order": "desc"}}],
                     "size": 20
                 }
-            
-            # Выполнить запрос
+
             if not es:
                 return jsonify({"error": "Elasticsearch not available"}), 503
-                
-            result = es.search(index=app.config['ELASTICSEARCH_INDEX'], body=query)
-            
-            # Обработать результаты
-            if result['hits']['total']['value'] == 0:
-                return jsonify({
-                    "error": f"No news found for {report_type} '{entity_or_topic}' in the selected period"
-                }), 404
-                
-            # Подготовка данных для LLM в более чистом формате
+  
+            try:
+                result = es.search(index=app.config['ELASTICSEARCH_INDEX'], body=query)
+
+                if result['hits']['total']['value'] == 0:
+                    return jsonify({
+                        "error": f"No news found for {report_type} '{entity_or_topic}' in the selected period"
+                    }), 404
+                    
+            except Exception as e:
+                logger.error(f"Elasticsearch search error: {e}")
+                return jsonify({"error": f"Search error: {str(e)}"}), 500             
+
+            selected_news = result['hits']['hits'] 
+            total_found = result['hits']['total']['value']
+
             news_items_text = ""
-            for i, hit in enumerate(result['hits']['hits'], 1):
+            for i, hit in enumerate(selected_news, 1):
                 source = hit['_source']
-                date_str = source.get('date')
+                news_text = source.get('text', '')
+                    
                 try:
-                    # Преобразуем timestamp в читаемую дату
-                    date_ms = int(date_str)
-                    date_readable = datetime.fromtimestamp(date_ms/1000).strftime('%d.%m.%Y')
+                    date_str = source.get('date')
+                    if isinstance(date_str, (int, float)):
+                        date_readable = datetime.fromtimestamp(date_str/1000).strftime('%d.%m.%Y')
+                    else:
+                        date_readable = date_str
                 except:
-                    date_readable = date_str
+                    date_readable = source.get('date', 'Не указана')
                     
                 news_items_text += f"\nНовость #{i}:\n"
                 news_items_text += f"Дата: {date_readable}\n"
                 news_items_text += f"Канал: {source.get('channel_name')}\n"
-                news_items_text += f"Текст: {source.get('text')}\n"
+                news_items_text += f"Текст: {news_text}\n"
                 news_items_text += f"Тональность: {source.get('sentiment', {}).get('label', 'neutral')}\n"
-                news_items_text += "-"*50 + "\n"
-            
-            # Формируем понятный текстовый запрос вместо JSON
+                news_items_text += "-"*20 + "\n"
+
             llm_prompt = f"""
-            Задача: Сгенерировать аналитический отчет по {'сущности' if report_type == 'entity' else 'теме'} "{entity_or_topic}" за последний {"день" if time_period == "1d" else "неделю" if time_period == "7d" else "месяц" if time_period == "30d" else "квартал"}.
+                <instruction>
+                Ты опытный новостной аналитик с глубоким пониманием российской и международной современной ноаостной повестки. Тебе поручено составить профессиональный аналитический отчет о {"сущности" if report_type == "entity" else "теме"} "{entity_or_topic}" на основе {len(selected_news)} новостей за период {"день" if time_period == "1d" else "неделю" if time_period == "7d" else "месяц" if time_period == "30d" else "квартал"}.
 
-            Исходные новости:
-            {news_items_text}
+                Формат отчета:
+                # Аналитический отчет: {entity_or_topic}
+                ## Период: {time_period}
+                ## Дата: {datetime.now().strftime('%d.%m.%Y')}
 
-            Пожалуйста, составь подробный аналитический отчет, включающий:
-            1. Общую тенденцию (позитивная/негативная/нейтральная)
-            2. Основные события и их влияние
-            3. Ключевые факты и цифры из новостей
-            4. Изменения в отношении к {'сущности' if report_type == 'entity' else 'теме'} за этот период
-            5. Прогноз дальнейшего развития ситуации
+                ### 1. Основные выводы
+                - Определи 3-5 ключевых трендов или выводов на основе предоставленных новостей
+                - Рассмотри контекст и возможные последствия описанных событий
+                - Оцени значимость каждого вывода в более широком плане
 
-            Представь информацию в структурированном виде с заголовками разделов.
-            Сосредоточься именно на "{entity_or_topic}" и информации, которая непосредственно относится к этой {'сущности' if report_type == 'entity' else 'теме'}.
+                ### 2. Ключевые события
+                - Перечисли наиболее важные события в хронологическом порядке
+                - Для каждого события укажи его потенциальное значение
+                - Выяви причинно-следственные связи между событиями, если они есть
+
+                ### 3. Тональность и тенденции
+                - Проведи детальный анализ тональности всех новостей (положительная, отрицательная, нейтральная)
+                - Определи, как менялась риторика по данной теме/сущности в течение периода
+                - Выяви скрытые намерения и подтексты в сообщениях
+                - Сравни освещение событий в разных источниках, если это возможно
+                - Сделай прогноз дальнейшего развития ситуации на основании выявленных тенденций
+
+                ### 4. Медиа-стратегия и коммуникации
+                - Проанализируй, как преподносится информация о {entity_or_topic}
+                - Отметь ключевые месседжи и нарративы, которые продвигаются через новостную повестку
+                - Оцени эффективность коммуникационной стратегии
+
+                В своем анализе будь объективен, опирайся только на предоставленные факты, но применяй критическое мышление для выявления скрытых закономерностей. Избегай поверхностных выводов.
+
+                Данные для анализа:
+                {news_items_text}
+
+                Пожалуйста, предоставь только текст отчета, без лишних символов в начале и в конце. ТОЛЬКО ТЕКСТ В ТОМ ЖЕ ФОРМАТЕ, ЧТО Я ОТПРАВИЛ и только НА РУССКОМ!
+                </instruction>
             """
+
+
+            llm_url = app.config.get('LLM_URL', 'http://llm-heavy:8000/generate')
+            report_text = ""
+            generation_method = "fallback"
+
+            max_retries = 2
+            retry_delay = 3
             
-            # Вызов LLM API
-            llm_url = app.config.get('LLM_URL') or os.environ.get('LOCAL_LLM_URL', 'http://llm-service:8000/generate')
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"Sending report request to LLM (attempt {attempt+1})")
+                    
+                    llm_response = requests.post(
+                        llm_url,
+                        json={
+                            "prompt": llm_prompt,
+                            "max_tokens": 7500,
+                            "temperature": 0.4,
+                            "is_report": True
+                        },
+                        timeout=800
+                    )
+                    
+                    if llm_response.status_code == 200:
+                        llm_result = llm_response.json()
+                        report_text = llm_result.get('generated_text', '')
+                        generation_method = "llm"
+                        
+                        if report_text:
+                            break
+
+                    logger.warning(f"LLM attempt {attempt+1} failed: {llm_response.status_code}")
+                    time.sleep(retry_delay)
+                    
+                except requests.exceptions.Timeout:
+                    logger.warning(f"LLM timeout on attempt {attempt+1}")
+                    time.sleep(retry_delay)
+                    continue
+                except Exception as e:
+                    logger.error(f"LLM error on attempt {attempt+1}: {e}")
+                    time.sleep(retry_delay)
+                    continue
+
+            if not report_text:
+                report_text = generate_basic_report(entity_or_topic, time_period, selected_news)
+                logger.info("Using fallback report generation")
+
+            return jsonify({
+                "report": {
+                    "type": report_type,
+                    "entity_or_topic": entity_or_topic,
+                    "period": time_period,
+                    "generated_text": report_text,
+                    "news_count": total_found,
+                    "analyzed_news": len(selected_news),
+                    "generated_at": datetime.now().isoformat(),
+                    "generation_method": generation_method
+                }
+            })
             
-            try:
-                llm_response = requests.post(
-                    llm_url,
-                    json={"prompt": llm_prompt, "max_tokens": 1500, "temperature": 0.7},
-                    timeout=180,  # Увеличенный таймаут для генерации отчета
-                    is_report=True
-                )
-                
-                if llm_response.status_code != 200:
-                    logger.error(f"LLM API error: {llm_response.text}")
-                    raise Exception(f"LLM API returned status code {llm_response.status_code}")
-                    
-                llm_result = llm_response.json()
-                report_text = llm_result.get('generated_text', '')
-                
-                if not report_text:
-                    logger.warning("LLM returned empty response")
-                    raise Exception("LLM returned empty response")
-                    
-                # Очистка отчета от возможных JSON-артефактов
-                report_text = report_text.strip()
-                if report_text.startswith('", "') or report_text.startswith('"}') or report_text.startswith('"]:'):
-                    # Обрезаем некорректные JSON-фрагменты в начале
-                    report_text = report_text.split('\n', 1)[1] if '\n' in report_text else ""
-                    
-                if report_text.endswith('",') or report_text.endswith('"}') or report_text.endswith('":'):
-                    # Обрезаем некорректные JSON-фрагменты в конце
-                    report_text = report_text.rsplit('\n', 1)[0] if '\n' in report_text else ""
-                    
-                # Подготовка итогового ответа
-                return jsonify({
-                    "report": {
-                        "type": report_type,
-                        "entity_or_topic": entity_or_topic,
-                        "period": time_period,
-                        "generated_text": report_text,
-                        "news_count": len(result['hits']['hits']),
-                        "generated_at": datetime.now().isoformat()
-                    }
-                })
-                
-            except Exception as e:
-                logger.error(f"Error generating report with LLM: {e}")
-                logger.debug(traceback.format_exc())
-                # Вернуть данные без отчета LLM в случае ошибки
-                return jsonify({
-                    "error": f"Failed to generate report: {str(e)}",
-                    "raw_data": {
-                        "type": report_type,
-                        "entity_or_topic": entity_or_topic,
-                        "period": time_period,
-                        "news_count": len(result['hits']['hits']),
-                        "news_sample": news_items_text[:1000]  # Первые 1000 символов текста новостей для отладки
-                    }
-                }), 500
-                
         except Exception as e:
             logger.error(f"Error in generate_report: {e}")
-            logger.debug(traceback.format_exc())
+            logger.error(traceback.format_exc())
             return jsonify({"error": f"Failed to generate report: {str(e)}"}), 500
 
+    def generate_basic_report(entity_or_topic, time_period, news_items):
+        period_text = {"1d": "день", "7d": "неделю", "30d": "месяц", "90d": "квартал"}.get(time_period, "период")
+
+        channels = set()
+        dates = []
+        sentiments = {"positive": 0, "negative": 0, "neutral": 0}
+        
+        for item in news_items:
+            source = item['_source']
+            channels.add(source.get('channel_name', ''))
+            dates.append(source.get('date', ''))
+            sentiment = source.get('sentiment', {}).get('label', 'neutral')
+            sentiments[sentiment] = sentiments.get(sentiment, 0) + 1
+
+        main_sentiment = max(sentiments.items(), key=lambda x: x[1])[0] if sentiments else "neutral"
+        sentiment_map = {
+            "positive": "позитивная", 
+            "negative": "негативная", 
+            "neutral": "нейтральная"
+        }
+
+        report = f"""Аналитический отчет: {entity_or_topic}
+            ## Период: {time_period}
+            ## Дата: {datetime.now().strftime('%d.%m.%Y')}
+
+            ### 1. Основные выводы
+            За последний {period_text} обнаружено {len(news_items)} упоминаний о "{entity_or_topic}" в {len(channels)} Telegram-каналах. Преобладающая тональность упоминаний - {sentiment_map.get(main_sentiment, "смешанная")}.
+
+            ### 2. Ключевые события
+        """
+
+        event_counter = 0
+        for _, item in enumerate(news_items[:min(5, len(news_items))], 1):
+            source = item['_source']
+            try:
+                date_str = source.get('date')
+                if isinstance(date_str, (int, float)):
+                    date = datetime.fromtimestamp(date_str/1000).strftime('%d.%m.%Y')
+                else:
+                    date = date_str
+            except:
+                date = "Не указана"
+                
+            text = source.get('text', '')
+            if text:
+                event_counter += 1
+                short_text = text[:150] + "..." if len(text) > 150 else text
+                report += f"{event_counter}. {date}: {short_text}\n\n"
+
+        if event_counter == 0:
+            report += "Нет подробных данных о конкретных событиях в указанный период.\n\n"
+
+        total_news = len(news_items) or 1
+        report += f"""### 3. Тональность и тенденции
+            Распределение тональности упоминаний:
+            - Позитивные: {sentiments.get('positive', 0)} ({int(sentiments.get('positive', 0) * 100 / total_news)}%)
+            - Негативные: {sentiments.get('negative', 0)} ({int(sentiments.get('negative', 0) * 100 / total_news)}%)
+            - Нейтральные: {sentiments.get('neutral', 0)} ({int(sentiments.get('neutral', 0) * 100 / total_news)}%)
+        """
+
+        if channels:
+            channels_list = list(channels)
+            if len(channels_list) <= 5:
+                report += f"\nСообщения публиковались в следующих каналах: {', '.join(channels_list)}."
+            else:
+                report += f"\nСообщения публиковались в {len(channels_list)} каналах, включая: {', '.join(channels_list[:5])}..."
+
+        return report
 
     @app.route('/api/channels', methods=['GET'])
     @token_required
@@ -728,8 +915,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                 return jsonify({"error": "User ID not found"}), 400
                 
             channels = []
-            
-            # Use the connection manager to get channels
+
             with pg_manager as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute("""
@@ -740,28 +926,22 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     """, (user_id,))
                     
                     channels = cur.fetchall()
-                    
-                    # Convert datetime objects to strings for JSON serialization
+
                     for channel in channels:
                         if 'added_at' in channel and channel['added_at']:
                             channel['added_at'] = channel['added_at'].isoformat()
-            
-            # Check if we have channels to process
+
             if not channels:
                 return jsonify({"channels": [], "message": "No channels found for this user"})
-            
-            # Get channel statistics from Elasticsearch
+
             channel_names = [channel['channel_name'] for channel in channels]
-            
-            # Check if Elasticsearch is available
+
             if not es:
                 logger.warning("Elasticsearch not available for channel statistics")
-                # Return channels without statistics
                 for channel in channels:
                     channel["stats"] = {"total_messages": 0, "last_24h_messages": 0}
                 return jsonify({"channels": channels, "warning": "Statistics temporarily unavailable"})
-            
-            # Build Elasticsearch query for channel statistics
+
             query = {
                 "size": 0,
                 "aggs": {
@@ -817,13 +997,11 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             
             try:
                 result = es.search(index=app.config['ELASTICSEARCH_INDEX'], body=query)
-                
-                # Process the results
+
                 channels_stats = {}
                 for bucket in result["aggregations"]["channels"]["buckets"]:
                     channel = bucket["key"]
-                    
-                    # Extract sentiment data
+
                     sentiment_data = []
                     if "recent_sentiment" in bucket and "sentiment" in bucket["recent_sentiment"]:
                         sentiment_buckets = bucket["recent_sentiment"]["sentiment"]["buckets"]
@@ -839,8 +1017,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                         "last_7d_messages": bucket["last_7d"]["doc_count"],
                         "sentiments": sentiment_data
                     }
-                
-                # Enhance channel data with statistics
+
                 for channel in channels:
                     channel_name = channel.get("channel_name", "")
                     if channel_name in channels_stats:
@@ -855,7 +1032,6 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                         
             except Exception as e:
                 logger.error(f"Error getting channel statistics: {e}")
-                # Add empty statistics
                 for channel in channels:
                     channel["stats"] = {"total_messages": 0, "last_24h_messages": 0}
             
@@ -879,19 +1055,15 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             
             channel_name = data.get('channel_name').strip()
             channel_title = data.get('channel_title', channel_name).strip()
-            
-            # Validation
+
             if not channel_name:
                 return jsonify({"error": "Channel name cannot be empty"}), 400
-                
-            # Remove @ from the beginning if present
+
             if channel_name.startswith('@'):
                 channel_name = channel_name[1:]
-            
-            # Add channel to database
+
             with pg_manager as conn:
                 with conn.cursor() as cur:
-                    # Check if channel already exists for this user
                     cur.execute("""
                         SELECT id FROM user_channels 
                         WHERE user_id = %s AND channel_name = %s
@@ -899,8 +1071,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     
                     if cur.fetchone():
                         return jsonify({"error": "Channel already added for this user"}), 409
-                    
-                    # Add the channel
+
                     cur.execute("""
                         INSERT INTO user_channels (user_id, channel_name, channel_title)
                         VALUES (%s, %s, %s)
@@ -932,7 +1103,6 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             
             with pg_manager as conn:
                 with conn.cursor() as cur:
-                    # Verify channel ownership
                     cur.execute("""
                         SELECT channel_name FROM user_channels 
                         WHERE id = %s AND user_id = %s
@@ -943,8 +1113,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                         return jsonify({"error": "Channel not found or not owned by user"}), 404
                     
                     channel_name = result[0]
-                    
-                    # Delete the channel
+
                     cur.execute("DELETE FROM user_channels WHERE id = %s", (channel_id,))
                     conn.commit()
             
@@ -969,8 +1138,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             
             if not data:
                 return jsonify({"error": "No data provided"}), 400
-                
-            # Extract update data
+
             channel_title = data.get('channel_title')
             
             if not channel_title or not channel_title.strip():
@@ -980,7 +1148,6 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             
             with pg_manager as conn:
                 with conn.cursor() as cur:
-                    # Verify channel ownership
                     cur.execute("""
                         SELECT channel_name FROM user_channels 
                         WHERE id = %s AND user_id = %s
@@ -989,8 +1156,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     result = cur.fetchone()
                     if not result:
                         return jsonify({"error": "Channel not found or not owned by user"}), 404
-                    
-                    # Update the channel
+
                     cur.execute("""
                         UPDATE user_channels 
                         SET channel_title = %s
@@ -1009,8 +1175,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             logger.error(f"Error updating channel: {e}")
             logger.debug(traceback.format_exc())
             return jsonify({"error": "Failed to update channel"}), 500
-    
-    # Admin routes
+
     @app.route('/api/admin/users', methods=['GET'])
     @admin_required
     def get_users():
@@ -1028,8 +1193,6 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     """)
                     
                     users = cur.fetchall()
-                    
-                    # Convert datetime objects to strings
                     for user in users:
                         if 'created_at' in user and user['created_at']:
                             user['created_at'] = user['created_at'].isoformat()
@@ -1048,7 +1211,6 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
         try:
             with pg_manager as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    # Get user information
                     cur.execute("""
                         SELECT id, username, email, is_admin, is_active, created_at,
                                (SELECT COUNT(*) FROM user_channels WHERE user_id = users.id) as channels_count
@@ -1060,12 +1222,10 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     
                     if not user:
                         return jsonify({"error": "User not found"}), 404
-                    
-                    # Convert datetime objects to strings
+
                     if 'created_at' in user and user['created_at']:
                         user['created_at'] = user['created_at'].isoformat()
-                    
-                    # Get user's channels
+
                     cur.execute("""
                         SELECT id, channel_name, channel_title, added_at 
                         FROM user_channels
@@ -1074,8 +1234,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     """, (user_id,))
                     
                     channels = cur.fetchall()
-                    
-                    # Convert datetime objects to strings
+
                     for channel in channels:
                         if 'added_at' in channel and channel['added_at']:
                             channel['added_at'] = channel['added_at'].isoformat()
@@ -1098,16 +1257,13 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             
             if not data:
                 return jsonify({"error": "No data provided"}), 400
-            
-            # Prevent admin from deactivating their own account
+
             if user_id == admin_id and 'is_active' in data and not data['is_active']:
                 return jsonify({"error": "Cannot deactivate your own account"}), 400
-            
-            # Prevent admin from removing their own admin privileges
+
             if user_id == admin_id and 'is_admin' in data and not data['is_admin']:
                 return jsonify({"error": "Cannot remove your own admin privileges"}), 400
-            
-            # Build update query dynamically based on provided fields
+
             update_fields = []
             update_values = []
             valid_fields = ['is_active', 'is_admin', 'email']
@@ -1122,7 +1278,6 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             
             with pg_manager as conn:
                 with conn.cursor() as cur:
-                    # Check if user exists
                     cur.execute("SELECT username FROM users WHERE id = %s", (user_id,))
                     result = cur.fetchone()
                     
@@ -1130,8 +1285,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                         return jsonify({"error": "User not found"}), 404
                     
                     username = result[0]
-                    
-                    # Update user data
+
                     update_query = f"UPDATE users SET {', '.join(update_fields)} WHERE id = %s RETURNING id"
                     update_values.append(user_id)
                     
@@ -1162,14 +1316,12 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
         """Удаление пользователя (только для админа)"""
         try:
             admin_id = request.user.get('id')
-            
-            # Prevent admin from deleting their own account
+
             if user_id == admin_id:
                 return jsonify({"error": "Cannot delete your own account"}), 400
             
             with pg_manager as conn:
                 with conn.cursor() as cur:
-                    # Check if user exists
                     cur.execute("SELECT username FROM users WHERE id = %s", (user_id,))
                     result = cur.fetchone()
                     
@@ -1177,12 +1329,10 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                         return jsonify({"error": "User not found"}), 404
                     
                     username = result[0]
-                    
-                    # Get the count of channels to be deleted
+
                     cur.execute("SELECT COUNT(*) FROM user_channels WHERE user_id = %s", (user_id,))
                     channels_count = cur.fetchone()[0]
-                    
-                    # Delete user (cascading will delete channels)
+
                     cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
                     conn.commit()
             
@@ -1203,10 +1353,8 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
     def get_admin_analytics_overview():
         """Получение общей аналитики системы (только для админа)"""
         try:
-            # Get time period from query params
             time_period = request.args.get('period', '7d')
-            
-            # Map time period to Elasticsearch date range
+
             period_map = {
                 '1d': 'now-1d',
                 '7d': 'now-7d',
@@ -1215,23 +1363,18 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             }
             
             from_date = period_map.get(time_period, 'now-7d')
-            
-            # Query PostgreSQL for user and channel stats
+
             with pg_manager as conn:
                 with conn.cursor() as cur:
-                    # Get total user count
                     cur.execute("SELECT COUNT(*) FROM users")
                     total_users = cur.fetchone()[0]
-                    
-                    # Get active user count
+
                     cur.execute("SELECT COUNT(*) FROM users WHERE is_active = TRUE")
                     active_users = cur.fetchone()[0]
-                    
-                    # Get total channel count
+
                     cur.execute("SELECT COUNT(*) FROM user_channels")
                     total_channels = cur.fetchone()[0]
-                    
-                    # Get count of channels per user
+
                     cur.execute("""
                         SELECT 
                             COUNT(user_id) as user_count,
@@ -1248,11 +1391,9 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     
                     user_channel_stats = cur.fetchone()
                     avg_channels_per_user = user_channel_stats[2] if user_channel_stats else 0
-            
-            # Query Elasticsearch for message stats
+
             if es:
                 try:
-                    # Query for message counts over time
                     time_query = {
                         "size": 0,
                         "query": {
@@ -1295,23 +1436,19 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     }
                     
                     result = es.search(index=app.config['ELASTICSEARCH_INDEX'], body=time_query)
-                    
-                    # Process results
+
                     total_messages = result["hits"]["total"]["value"]
-                    
-                    # Get daily message counts
+
                     daily_counts = [
                         {"date": bucket["key_as_string"], "count": bucket["doc_count"]}
                         for bucket in result["aggregations"]["messages_per_day"]["buckets"]
                     ]
-                    
-                    # Get top channels by message count
+
                     top_channels = [
                         {"name": bucket["key"], "count": bucket["doc_count"]}
                         for bucket in result["aggregations"]["channels"]["buckets"]
                     ]
-                    
-                    # Get sentiment distribution
+
                     sentiment_distribution = [
                         {"label": bucket["key"], "count": bucket["doc_count"]}
                         for bucket in result["aggregations"]["sentiment_distribution"]["buckets"]
@@ -1364,20 +1501,15 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
                     "status": "unavailable",
                     "message": "Elasticsearch connection not available"
                 }), 503
-            
-            # Get cluster health
+
             health = es.cluster.health()
-            
-            # Get index statistics
+
             index_stats = es.indices.stats(index=app.config['ELASTICSEARCH_INDEX'])
-            
-            # Get index mapping
+
             index_mapping = es.indices.get_mapping(index=app.config['ELASTICSEARCH_INDEX'])
-            
-            # Get index settings
+
             index_settings = es.indices.get_settings(index=app.config['ELASTICSEARCH_INDEX'])
-            
-            # Format the response
+
             return jsonify({
                 "cluster": {
                     "name": es.cluster.state()["cluster_name"],
@@ -1581,8 +1713,7 @@ def register_routes(app, db, es, token_required, admin_required, pg_manager):
             logger.error(f"Error retrieving user profile: {e}")
             logger.debug(traceback.format_exc())
             return jsonify({"error": "Failed to retrieve user profile"}), 500
-    
-    # Register error handlers
+
     @app.errorhandler(404)
     def not_found(error):
         return jsonify({"error": "Resource not found"}), 404
