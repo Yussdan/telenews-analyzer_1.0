@@ -1,113 +1,74 @@
-Telegram News Analyzer
-Обзор проекта
-Telegram News Analyzer - это современная система для сбора, анализа и визуализации новостных данных из Telegram-каналов. Система использует микросервисную архитектуру для обеспечения масштабируемости, надежности и гибкости в обработке данных.
+# Telegram News Analyzer
 
-Архитектура системы
+## Overview
 
-Ключевые возможности
-Сбор данных: автоматический мониторинг публичных и приватных Telegram-каналов
-Анализ текста: обработка естественного языка для извлечения ключевой информации
-Анализ тональности: определение эмоциональной окраски новостных сообщений
-Тематическое моделирование: автоматическое выявление тем и трендов
-Визуализация: интерактивные дашборды и аналитические отчеты
-Мониторинг: отслеживание упоминаний и ключевых слов
-Структура проекта
-yussdan-telenews-analyzer/
-└── telegram-news-analysis/
-    ├── docker-compose.yml       # Конфигурация Docker Compose для запуска всех сервисов
-    ├── setup.sh                 # Скрипт инициализации проекта
-    ├── .built_images            # Метка собранных Docker-образов
-    ├── .env                     # Переменные окружения (не включены в репозиторий)
-    ├── .env.example             # Пример файла с переменными окружения
-    ├── sessions/                # Директория для хранения сессий Telegram
-    │   └── teeeeest.session     # Файл сессии Telegram
-    └── src/                     # Исходный код проекта
-        ├── test_client.py       # Тестовый клиент для проверки функциональности
-        ├── api/                 # Сервис API
-        │   ├── app.py           # Основной файл Flask-приложения
-        │   ├── db_connection.py # Управление соединениями с БД
-        │   ├── Dockerfile       # Docker-файл для сборки сервиса
-        │   ├── requirements.txt # Зависимости Python
-        │   └── routes.py        # Определение маршрутов REST API
-        ├── collector/           # Сервис сбора данных
-        │   ├── config.py        # Конфигурация сервиса
-        │   ├── Dockerfile       # Docker-файл для сборки сервиса
-        │   ├── requirements.txt # Зависимости Python
-        │   ├── telegram_collector.py # Основной код для сбора данных
-        │   ├── telegram_news_session.session # Файл сессии
-        │   └── test_channel.py  # Тестовый скрипт для проверки сбора данных
-        ├── frontend/            # Веб-интерфейс
-        │   ├── app.py           # Основной файл Flask-приложения
-        │   ├── Dockerfile       # Docker-файл для сборки сервиса
-        │   ├── requirements.txt # Зависимости Python
-        │   ├── static/          # Статические файлы (CSS, JavaScript)
-        │   │   ├── css/
-        │   │   │   └── style.css
-        │   │   └── js/
-        │   │       ├── main.js
-        │   │       └── news.js
-        │   └── templates/       # HTML шаблоны
-        │       ├── admin.html
-        │       ├── admin_user_details.html
-        │       ├── base.html
-        │       ├── channels.html
-        │       ├── index.html
-        │       ├── layout.html
-        │       ├── login.html
-        │       ├── news.html
-        │       ├── register.html
-        │       └── trends.html
-        └── processor/           # Сервис обработки и анализа данных
-            ├── db_connection.py # Управление соединениями с БД
-            ├── Dockerfile       # Docker-файл для сборки сервиса
-            ├── news_processor.py # Основной код обработки данных
-            ├── requirements.txt # Зависимости Python
-            ├── sentiment_analysis.py # Модуль анализа тональности
-            ├── topic_modeling.py # Модуль тематического моделирования
-            └── utils.py         # Вспомогательные функции
-Компоненты системы
-Collector
-Сервис для сбора данных из Telegram-каналов с использованием Telethon API.
+The Telegram News Analyzer is a system designed for collecting, analyzing, and visualizing news data from Telegram channels. It employs a microservice architecture to ensure scalability and reliability in data processing. The system consists of several components including a collector, processor, API, and frontend, each containerized with Docker.
 
-Ключевые функции:
+## Key Features
 
-Подключение к Telegram API
-Сбор сообщений из указанных каналов
-Первичная фильтрация данных
-Отправка сообщений в Kafka для дальнейшей обработки
-Processor
-Сервис для обработки и анализа собранных данных с использованием Apache Spark и библиотек NLP.
+-   **Data Collection**: Monitors public and private Telegram channels using the Telethon API.
+-   **Text Analysis**: Utilizes natural language processing techniques for extracting key information.
+-   **Sentiment Analysis**: Determines the emotional tone of news messages.
+-   **Topic Modeling**: Automatically identifies trending topics.
+-   **Visualization**: Provides interactive dashboards for data visualization.
 
-Ключевые функции:
+## Architecture
 
-Лингвистический анализ текста
-Анализ тональности (sentiment analysis)
-Тематическое моделирование
-Извлечение именованных сущностей (NER)
-Сохранение результатов в MongoDB и индексация в Elasticsearch
-API
-REST API для доступа к обработанным данным и управления системой.
+```mermaid
+sequenceDiagram
+    participant Frontend
+    participant API
+    participant Processor
+    participant Collector
+    participant Kafka
+    participant PostgreSQL
+    participant MongoDB
+    participant Elasticsearch
 
-Ключевые функции:
+    Frontend->>API: Request News Data
+    API->>Elasticsearch: Query for News
+    Elasticsearch-->>API: Return News Data
+    API->>PostgreSQL: User Authentication/Authorization
+    PostgreSQL-->>API: Authentication Status
+    API-->>Frontend: Respond with News Data
 
-Аутентификация и авторизация пользователей
-Эндпоинты для получения данных
-Управление каналами для мониторинга
-Доступ к аналитической информации
-Frontend
-Веб-интерфейс для взаимодействия с системой.
+    Collector->>Kafka: Send Telegram Messages
+    Processor->>Kafka: Consume Telegram Messages
+    Processor->>LLM: Analyze Sentiment, Topics, Entities
+    LLM-->>Processor: Analysis Results
+    Processor->>MongoDB: Store Messages and Analysis
+    Processor->>Elasticsearch: Index Data for Search
+```
+Components
+Collector: Collects data from Telegram channels and sends messages to Kafka. See src/collector/telegram_collector.py.
+Processor: Consumes messages from Kafka, performs analysis, and stores results in MongoDB and Elasticsearch. See src/processor/news_processor.py.
+API: Provides a REST API for accessing processed data and managing the system. See src/api/app.py and src/api/routes.py.
+Frontend: Offers a web interface for interacting with the system. See src/frontend/app.py.
+Infrastructure
+PostgreSQL: Stores structured data such as user information and settings.
+MongoDB: Stores messages and analysis results.
+Elasticsearch: Provides full-text search and fast data access.
+Kafka: Facilitates message exchange between components.
+Docker: Containerizes and deploys services.
+Setup
+Clone the repository:
+```
+git clone <repository_url>
+cd yussdan-telenews-analyzer/telegram-news-analysis
+```
+Configure environment variables:
 
-Ключевые функции:
+Create a .env file based on the .env.example file.
+Fill in the Telegram API credentials, database URIs, and other settings.
+Run the setup script:
+```
+bash setup.sh
+```
+This script builds and starts the Docker containers using docker-compose.
 
-Визуализация результатов анализа
-Управление пользовательскими настройками
-Просмотр новостей и аналитики
-Настройка мониторинга каналов
-Инфраструктурные компоненты
-Система использует следующие технологии для хранения и обработки данных:
-
-PostgreSQL: хранение структурированных данных (пользователи, настройки, метаданные)
-MongoDB: хранение сообщений и результатов анализа
-Elasticsearch: полнотекстовый поиск и быстрый доступ к данным
-Kafka: обмен сообщениями между компонентами
-Docker: контейнеризация и развертывание сервисов
+Usage
+```
+Access the web interface at http://localhost:8080.
+Use the API endpoints to retrieve data and manage the system.
+Check the logs for each service using docker-compose logs -f <service_name>.
+```
