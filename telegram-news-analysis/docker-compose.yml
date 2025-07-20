@@ -53,7 +53,7 @@ services:
       interval: 20s
       timeout: 10s
       retries: 5
-      start_period: 120s
+      start_period: 240s
   llm-light-2:
     build:
       context: ./src/llm
@@ -88,7 +88,7 @@ services:
       interval: 20s
       timeout: 10s
       retries: 5
-      start_period: 120s
+      start_period: 240s
   llm-light-3:
     build:
       context: ./src/llm
@@ -123,7 +123,7 @@ services:
       interval: 20s
       timeout: 10s
       retries: 5
-      start_period: 120s
+      start_period: 240s
 
   llm-heavy:
     build:
@@ -162,7 +162,7 @@ services:
       interval: 30s
       timeout: 15s
       retries: 3
-      start_period: 180s
+      start_period: 240s
     ulimits:
       memlock:
         soft: -1
@@ -347,6 +347,9 @@ services:
       - USE_HEAVYWEIGHT_LLM=false
       - SPARK_DRIVER_MEMORY=6g
       - SPARK_EXECUTOR_MEMORY8g
+    volumes:
+      - ./jars:/app/jars
+      - ivy-cache:/root/.ivy2
     env_file:
       - .env
     networks:
@@ -364,7 +367,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "5050:5050"
+      - "5050:5000"
     env_file:
       - .env
     networks:
@@ -402,3 +405,4 @@ volumes:
   spark-worker-logs:
   spark-checkpoints:
   models:
+  ivy-cache:

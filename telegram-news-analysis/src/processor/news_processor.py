@@ -14,11 +14,12 @@ from pymongo import MongoClient, UpdateOne, ASCENDING
 import asyncio
 from functools import partial
 import nest_asyncio
-
-logging.basicConfig(level=logging.INFO, 
-                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
+from typing import Dict, List, Tuple, Optional
+from elasticsearch import Elasticsearch
+import aiohttp
+from datetime import datetime
+import pandas as pd
+import os
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, 
@@ -41,12 +42,15 @@ ELASTICSEARCH_HOST = os.getenv("ELASTICSEARCH_HOST", "elasticsearch")
 ELASTICSEARCH_METRICS_INDEX = os.getenv("ELASTICSEARCH_METRICS_INDEX", "telegram_metrics")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "telegram_news")
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
-RETRY_DELAY = int(os.getenv("RETRY_DELAY", "3"))
-CONNECTION_TIMEOUT = int(os.getenv("CONNECTION_TIMEOUT", "200"))
+RETRY_DELAY = int(os.getenv("RETRY_DELAY", "1"))
+CONNECTION_TIMEOUT = int(os.getenv("CONNECTION_TIMEOUT", "600"))
 POSTGRES_URI = os.getenv("POSTGRES_URI", "postgresql://admin:password@postgres:5432/telenews")
 USE_LIGHTWEIGHT_LLM = os.getenv("USE_LIGHTWEIGHT_LLM", "true").lower() == "true"
 
+JARS_DIR = "/app/jars"
+JARS_AVAILABLE = os.path.exists(JARS_DIR) and len(os.listdir(JARS_DIR)) > 0
 
+# Схемы данных
 message_schema = StructType([
     StructField("id", StringType(), True),
     StructField("text", StringType(), True),
@@ -78,75 +82,97 @@ entity_schema = StructType([
     StructField("description", StringType(), True)
 ])
 
-LLM_CACHE = {}
+# Кэш для LLM ответов с ограничением размера
+from collections import OrderedDict
+class LRUCache(OrderedDict):
+    def __init__(self, maxsize=1000):
+        super().__init__()
+        self.maxsize = maxsize
+        
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        self.move_to_end(key)
+        return value
+        
+    def __setitem__(self, key, value):
+        if key in self:
+            self.move_to_end(key)
+        super().__setitem__(key, value)
+        if len(self) > self.maxsize:
+            self.popitem(last=False)
 
+LLM_CACHE = LRUCache(maxsize=10000)
 
-def ensure_es_index():
-    from elasticsearch import Elasticsearch
-
-    ELASTICSEARCH_HOST_LOCAL = ELASTICSEARCH_HOST
+def get_elasticsearch_client() -> Elasticsearch:
+    """Создает и возвращает клиент Elasticsearch"""
     try:
-        es = Elasticsearch([{"host": ELASTICSEARCH_HOST_LOCAL, "port": int(ELASTICSEARCH_PORT), "scheme": "http"}])
+        return Elasticsearch([{"host": ELASTICSEARCH_HOST, "port": ELASTICSEARCH_PORT, "scheme": "http"}])
     except Exception:
-        es = Elasticsearch(f"http://{ELASTICSEARCH_HOST_LOCAL}:{ELASTICSEARCH_PORT}")
+        return Elasticsearch(f"http://{ELASTICSEARCH_HOST}:{ELASTICSEARCH_PORT}")
 
-    index = ELASTICSEARCH_NEWS_INDEX
-
+def ensure_es_index() -> None:
+    """Создает индекс в Elasticsearch если он не существует"""
+    es = get_elasticsearch_client()
+    
     mapping = {
         "mappings": {
             "properties": {
-                "id":           { "type": "keyword" },
-                "text":         { "type": "text" },
-                "channel_id":   { "type": "keyword" },
-                "channel_name": { "type": "keyword" },
-                "date":         { "type": "date", "format": "yyyy-MM-dd'T'HH:mm:ss||strict_date_optional_time||epoch_millis" },
-                "views":        { "type": "integer" },
-                "forwards":     { "type": "integer" },
-                "has_media":    { "type": "keyword" },
+                "id": {"type": "keyword"},
+                "text": {"type": "text"},
+                "channel_id": {"type": "keyword"},
+                "channel_name": {"type": "keyword"},
+                "date": {"type": "date", "format": "yyyy-MM-dd'T'HH:mm:ss||strict_date_optional_time||epoch_millis"},
+                "views": {"type": "integer"},
+                "forwards": {"type": "integer"},
+                "has_media": {"type": "keyword"},
                 "sentiment": {
                     "properties": {
-                        "label":       { "type": "keyword" },
-                        "score":       { "type": "float" },
-                        "explanation": { "type": "text" }
+                        "label": {"type": "keyword"},
+                        "score": {"type": "float"},
+                        "explanation": {"type": "text"}
                     }
                 },
                 "topics": {
                     "type": "nested",
                     "properties": {
-                        "label":      { "type": "keyword" },
-                        "keywords":   { "type": "keyword" },
-                        "similarity": { "type": "float" }
+                        "label": {"type": "keyword"},
+                        "keywords": {"type": "keyword"},
+                        "similarity": {"type": "float"}
                     }
                 },
                 "main_entity": {
                     "properties": {
-                        "name":        { "type": "keyword" },
-                        "type":        { "type": "keyword" },
-                        "description": { "type": "text" }
+                        "name": {"type": "keyword"},
+                        "type": {"type": "keyword"},
+                        "description": {"type": "text"}
                     }
                 },
                 "entity_mentions": {
                     "type": "nested",
                     "properties": {
-                        "entity_name": { "type": "keyword" },
-                        "offset":      { "type": "integer" }
+                        "entity_name": {"type": "keyword"},
+                        "offset": {"type": "integer"}
                     }
                 }
             }
+        },
+        "settings": {
+            "index": {
+                "refresh_interval": "1s", # Более частое обновление индекса
+                "number_of_shards": 3,    # Увеличено количество шардов
+                "number_of_replicas": 1
+            }
         }
     }
-    if not es.indices.exists(index=index):
-        es.indices.create(index=index, body=mapping)
-        logger.info(f"Создан индекс {index} в Elasticsearch")
+
+    if not es.indices.exists(index=ELASTICSEARCH_NEWS_INDEX):
+        es.indices.create(index=ELASTICSEARCH_NEWS_INDEX, body=mapping)
+        logger.info(f"Создан индекс {ELASTICSEARCH_NEWS_INDEX}")
     else:
-        logger.info(f"Индекс {index} уже существует")
+        logger.info(f"Индекс {ELASTICSEARCH_NEWS_INDEX} уже существует")
 
-
-def safe_first_json_obj(text):
-    """
-    Извлекает самый первый JSON-объект ({...}) из текста, даже если текст содержит что-то до/после.
-    Возвращает dict или empty dict.
-    """
+def safe_first_json_obj(text: str) -> dict:
+    """Извлекает первый JSON объект из текста"""
     match = re.search(r'\{[\s\S]*?\}', text)
     if match:
         try:
@@ -155,24 +181,20 @@ def safe_first_json_obj(text):
             logger.warning(f"Error parsing JSON from LLM: {e}. Raw={match.group(0)[:100]}")
     return {}
 
-def safe_first_json_array(text):
-    """
-    Извлекает JSON-массив ([{...}]) из текста.
-    Возвращает list (list-of-dict) или пустой список
-    """
+def safe_first_json_array(text: str) -> List[dict]:
+    """Извлекает JSON массив из текста"""
     match = re.search(r'\[\s*\{[\s\S]*?\}\s*\]', text)
     if match:
         try:
             arr = json.loads(match.group(0))
             if isinstance(arr, list):
-                arr = [x for x in arr if isinstance(x, dict)]
-                return arr
+                return [x for x in arr if isinstance(x, dict)]
         except Exception as e:
             logger.warning(f"Error parsing JSON array from LLM: {e}. Raw={match.group(0)[:100]}")
     return []
 
 def run_async_in_thread(async_func, *args, **kwargs):
-    """Запускает асинхронную функцию в отдельном потоке executor'а"""
+    """Запускает асинхронную функцию в отдельном потоке"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     nest_asyncio.apply(loop)
@@ -181,19 +203,17 @@ def run_async_in_thread(async_func, *args, **kwargs):
     finally:
         loop.close()
 
-async def async_llm_request(url, payload, timeout=CONNECTION_TIMEOUT):
-    """Асинхронно отправляет запрос к LLM-сервису"""
-    import aiohttp
-    
+async def async_llm_request(url: str, payload: dict, timeout: int = CONNECTION_TIMEOUT) -> Optional[str]:
+    """Асинхронный запрос к LLM сервису"""
+    connector = aiohttp.TCPConnector(limit=100) # Увеличен лимит соединений
     for attempt in range(MAX_RETRIES):
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(connector=connector) as session:
                 async with session.post(url, json=payload, timeout=timeout) as response:
                     if response.status == 200:
                         resp_data = await response.json()
                         return resp_data.get("generated_text", resp_data.get("text", ""))
-                    else:
-                        logger.warning(f"Ошибка API, статус: {response.status}, URL: {url}")
+                    logger.warning(f"Ошибка API, статус: {response.status}, URL: {url}")
         except Exception as e:
             logger.warning(f"Ошибка запроса к {url}: {str(e)}")
         
@@ -201,19 +221,12 @@ async def async_llm_request(url, payload, timeout=CONNECTION_TIMEOUT):
             await asyncio.sleep(RETRY_DELAY)
     
     return None
-async def parallel_llm_requests(text):
-    """Параллельно выполняет запросы к трем LLM-сервисам"""
 
-    if not USE_LIGHTWEIGHT_LLM:
+async def parallel_llm_requests(text: str) -> Tuple[str, str, str]:
+    """Параллельные запросы к LLM сервисам"""
+    if not USE_LIGHTWEIGHT_LLM or not text or len(text) < 20:
         return (
-            json.dumps({"label": "neutral", "score": 0.5, "explanation": "LLM отключен"}, ensure_ascii=False),
-            json.dumps([{"label": "Общество", "keywords": [], "similarity": 0.7}], ensure_ascii=False),
-            json.dumps({"name": "", "type": "", "description": ""}, ensure_ascii=False)
-        )
-    
-    if not text or len(text) < 20:
-        return (
-            json.dumps({"label": "neutral", "score": 0.5, "explanation": "Short text"}, ensure_ascii=False),
+            json.dumps({"label": "neutral", "score": 0.5, "explanation": "LLM отключен/короткий текст"}, ensure_ascii=False),
             json.dumps([{"label": "Общество", "keywords": [], "similarity": 0.7}], ensure_ascii=False),
             json.dumps({"name": "", "type": "", "description": ""}, ensure_ascii=False)
         )
@@ -222,123 +235,95 @@ async def parallel_llm_requests(text):
     if cache_key in LLM_CACHE:
         return LLM_CACHE[cache_key]
 
-    sentiment_prompt = f"""
-        You are a helpful assistant for Russian news analysis.
-        Analyze the sentiment of this news and reply with a SINGLE valid JSON.
-        
-        Example response:
-        {{
-        "label": "positive",
-        "score": 0.9(This is the percentage of how sure you are that the text is positive/negative/neutral.),
-        "explanation": "good result"
-        }}
+    prompts = {
+        "sentiment": f"""
+            You are a helpful assistant for Russian news analysis.
+            Analyze the sentiment of this news and reply with a SINGLE valid JSON.
+            
+            Example response:
+            {{
+            "label": "positive",
+            "score": 0.9,
+            "explanation": "good result"
+            }}
 
-        News: "{text[:400]}"
-    """
-    
-    topics_prompt = f"""
-        You are an intelligent news classifier.
-        Classify the MAIN TOPIC of this news.
-        
-        Reply ONLY with a JSON array containing ONE object.
+            News: "{text[:400]}"
+        """,
+        "topics": f"""
+            You are an intelligent news classifier.
+            Classify the MAIN TOPIC of this news.
+            
+            Reply ONLY with a JSON array containing ONE object.
 
-        Valid topics:
-        - Политика
-        - Экономика
-        - Происшествия
-        - Общество
-        - Технологии
-        - Спорт
-        - Культура
-        - Здоровье
-        - Наука
-        - Военные
-        - Знаменитости
+            Valid topics:
+            - Политика
+            - Экономика
+            - Происшествия
+            - Общество
+            - Технологии
+            - Спорт
+            - Культура
+            - Здоровье
+            - Наука
+            - Военные
+            - Знаменитости
 
-        Example:
-        [
-        {{
-            "label": "Общество",
-            "keywords": ["животные", "пес"],
-            "similarity": 0.9(This is the percentage of how sure you are that the text is positive/negative/neutral.)
-        }}
-        ]
+            Example:
+            [
+            {{
+                "label": "Общество",
+                "keywords": ["животные", "пес"],
+                "similarity": 0.9
+            }}
+            ]
 
-        News:
-        "{text[:600]}"
-    """
-    
-    entity_prompt = f"""
-        You are a precise information extractor.
-        Given a news fragment, extract the MAIN entity (person, organization, location, or event) it discusses.
+            News:
+            "{text[:600]}"
+        """,
+        "entity": f"""
+            You are a precise information extractor.
+            Given a news fragment, extract the MAIN entity (person, organization, location, or event) it discusses.
 
-        Reply ONLY with ONE valid JSON object and NOTHING else — no markdown, no code, no lists.
+            Reply ONLY with ONE valid JSON object and NOTHING else.
 
-        Example:
-        {{
-        "name": "ООН",
-        "type": "ОРГАНИЗАЦИЯ",
-        "description": "Международная организация"
-        }}
+            Example:
+            {{
+            "name": "ООН",
+            "type": "ОРГАНИЗАЦИЯ",
+            "description": "Международная организация"
+            }}
 
-        News:
-        "{text}"
-    """
-
-    sentiment_payload = {
-        "prompt": sentiment_prompt,
-        "max_tokens": 120,
-        "temperature": 0.3
-    }
-    
-    topics_payload = {
-        "prompt": topics_prompt,
-        "max_tokens": 120,
-        "temperature": 0.3
-    }
-    
-    entity_payload = {
-        "prompt": entity_prompt,
-        "max_tokens": 120,
-        "temperature": 0.3
+            News:
+            "{text}"
+        """
     }
 
-    tasks = [
-        async_llm_request(LLM_SENTIMENT_URL, sentiment_payload),
-        async_llm_request(LLM_TOPICS_URL, topics_payload),
-        async_llm_request(LLM_ENTITY_URL, entity_payload)
-    ]
+    payloads = {k: {"prompt": v, "max_tokens": 120, "temperature": 0.3} for k, v in prompts.items()}
     
+    urls = {
+        "sentiment": LLM_SENTIMENT_URL,
+        "topics": LLM_TOPICS_URL,
+        "entity": LLM_ENTITY_URL
+    }
+
+    tasks = [async_llm_request(urls[k], payloads[k]) for k in ["sentiment", "topics", "entity"]]
     responses = await asyncio.gather(*tasks)
 
-    sentiment_text, topics_text, entity_text = responses
+    sentiment = process_sentiment_response(responses[0] or "", text)
+    topics = process_topics_response(responses[1] or "", text)
+    entity = process_entity_response(responses[2] or "", text)
 
-    if sentiment_text:
-        sentiment = process_sentiment_response(sentiment_text, text)
-    else:
-        sentiment = {"label": "neutral", "score": 0.5, "explanation": "Не удалось получить ответ от LLM"}
-
-    if topics_text:
-        topics = process_topics_response(topics_text, text)
-    else:
-        topics = [{"label": "-", "keywords": [], "similarity": 0.0}]
-
-    if entity_text:
-        entity = process_entity_response(entity_text, text)
-    else:
-        entity = {"name": "", "type": "", "description": ""}
+    result = (
+        json.dumps(sentiment, ensure_ascii=False),
+        json.dumps(topics, ensure_ascii=False),
+        json.dumps(entity, ensure_ascii=False)
+    )
     
-    sentiment_json = json.dumps(sentiment, ensure_ascii=False)
-    topics_json = json.dumps(topics, ensure_ascii=False)
-    entity_json = json.dumps(entity, ensure_ascii=False)
-    
-    result = (sentiment_json, topics_json, entity_json)
     LLM_CACHE[cache_key] = result
-    
     return result
 
-def process_sentiment_response(response_text, original_text):
-    """Обрабатывает ответ для sentiment"""
+def process_sentiment_response(response_text: str, original_text: str) -> dict:
+    """Обработка ответа для sentiment"""
     sentiment = safe_first_json_obj(response_text)
     if not isinstance(sentiment, dict) or "label" not in sentiment:
         sentiment = {"label": "neutral", "score": 0.5, "explanation": "Failed to extract sentiment"}
@@ -352,17 +337,14 @@ def process_sentiment_response(response_text, original_text):
         lower_text = original_text.lower()
         negative_words = ["ужас", "катастроф", "трагед", "авари", "гибел", "умер", "убит", "разруш", "обрушил", "напад", "конфликт", "дтп", "ранен", "пострадавш", "погиб"]
         positive_words = ["успех", "радост", "побед", "достиж", "хорош", "прекрасн", "удач", "счаст", "любов"]
+        
         neg_count = sum(1 for word in negative_words if word in lower_text)
         pos_count = sum(1 for word in positive_words if word in lower_text)
-        if neg_count > pos_count:
-            label = "negative"
-        elif pos_count > neg_count:
-            label = "positive"
-        else:
-            label = "neutral"
+        
+        label = "negative" if neg_count > pos_count else "positive" if pos_count > neg_count else "neutral"
 
     if not isinstance(score, (float, int)):
-        score = {"positive":0.75, "negative":0.25, "neutral":0.5}[label]
+        score = {"positive": 0.75, "negative": 0.25, "neutral": 0.5}[label]
     else:
         score = float(score)
         if label == "positive" and score < 0.55:
@@ -372,22 +354,19 @@ def process_sentiment_response(response_text, original_text):
         elif label == "neutral" and (score < 0.4 or score > 0.6):
             score = 0.5
 
-    if not explanation:
-        explanation = "Автоматическое определение тональности"
-
     return {
         "label": label,
         "score": round(score, 3),
-        "explanation": explanation[:120]
+        "explanation": (explanation or "Автоматическое определение тональности")[:120]
     }
 
-def process_topics_response(response_text, original_text):
-    """Обрабатывает ответ для topics"""
-    valid_labels = [
+def process_topics_response(response_text: str, original_text: str) -> List[dict]:
+    """Обработка ответа для topics"""
+    valid_labels = {
         "Политика", "Экономика", "Происшествия", "Общество",
         "Технологии", "Спорт", "Культура", "Здоровье",
         "Наука", "Военные", "Знаменитости"
-    ]
+    }
     
     topics = safe_first_json_array(response_text)
     corrected_topics = []
@@ -399,33 +378,27 @@ def process_topics_response(response_text, original_text):
 
         label = topic.get("label", "")
         if not label or label not in valid_labels:
-            found = None
-            for v in valid_labels:
-                if v.lower() in lower_text:
-                    found = v
-                    break
-            label = found if found else "Общество"
+            found = next((v for v in valid_labels if v.lower() in lower_text), "Общество")
+            label = found
 
         sim = topic.get("similarity", 0.7)
         try:
             sim = float(sim)
+            if sim <= 0 or sim > 1:
+                sim = 0.7
         except Exception:
-            sim = 0.7
-        if sim <= 0 or sim > 1:
             sim = 0.7
 
         keywords = topic.get("keywords", [])
         if not isinstance(keywords, list):
             keywords = []
+            
         corrected_topics.append({"label": label, "keywords": keywords, "similarity": sim})
 
-    if not corrected_topics:
-        corrected_topics.append({"label": "Общество", "keywords": [], "similarity": 0.7})
-    
-    return corrected_topics
+    return corrected_topics or [{"label": "Общество", "keywords": [], "similarity": 0.7}]
 
-def process_entity_response(response_text, original_text):
-    """Обрабатывает ответ для entity"""
+def process_entity_response(response_text: str, original_text: str) -> dict:
+    """Обработка ответа для entity"""
     entity = safe_first_json_obj(response_text)
     if not isinstance(entity, dict):
         entity = {}
@@ -433,21 +406,21 @@ def process_entity_response(response_text, original_text):
     name = entity.get("name", "")
     if name:
         name = re.sub(r'[^\w\s\-.,а-яА-ЯёЁ]', '', name).strip()
-        if not name:
-            words = re.findall(r'[А-Я][а-яА-Я\-]+', original_text)
-            name = words[0] if words else ""
-    else:
-        name = ""
+    if not name:
+        words = re.findall(r'[А-Я][а-яА-Я\-]+', original_text)
+        name = words[0] if words else ""
     
     valid_types = {"ЧЕЛОВЕК", "ОРГАНИЗАЦИЯ", "МЕСТО", "СОБЫТИЕ"}
     eng_to_rus = {
         "PERSON": "ЧЕЛОВЕК",
-        "ORGANIZATION": "ОРГАНИЗАЦИЯ",
+        "ORGANIZATION": "ОРГАНИЗАЦИЯ", 
         "LOCATION": "МЕСТО",
         "EVENT": "СОБЫТИЕ"
     }
+    
     etype = entity.get("type", "").upper()
     etype = eng_to_rus.get(etype, etype)
+    
     if etype not in valid_types:
         if name:
             if any(name.lower().endswith(x) for x in ["виль", "град", "бург", "ск", "ово", "ино"]):
@@ -469,73 +442,57 @@ def process_entity_response(response_text, original_text):
         "description": description[:100] if description else ""
     }
 
-
-def llm_sentiment(text):
+def llm_sentiment(text: str) -> str:
     """UDF для получения sentiment из LLM"""
-    results = run_async_in_thread(partial(parallel_llm_requests, text))
-    return results[0]
+    return run_async_in_thread(partial(parallel_llm_requests, text))[0]
 
-def llm_topics(text):
+def llm_topics(text: str) -> str:
     """UDF для получения topics из LLM"""
-    results = run_async_in_thread(partial(parallel_llm_requests, text))
-    return results[1]
+    return run_async_in_thread(partial(parallel_llm_requests, text))[1]
 
-
-def llm_entity(text):
+def llm_entity(text: str) -> str:
     """UDF для получения entity из LLM"""
-    results = run_async_in_thread(partial(parallel_llm_requests, text))
-    return results[2]
+    return run_async_in_thread(partial(parallel_llm_requests, text))[2]
 
-async def async_check_llm_services():
-    """Асинхронно проверяет доступность всех LLM-сервисов"""
-    import aiohttp
-    
+async def check_service(session: aiohttp.ClientSession, service: dict, health_url: str) -> bool:
+    """Проверка доступности сервиса"""
+    try:
+        async with session.get(health_url, timeout=3) as response:
+            if response.status == 200:
+                logger.info(f"Сервис {service['name']} доступен по URL {service['url']}")
+                return True
+            logger.error(f"Сервис {service['name']} недоступен, статус: {response.status}")
+            return False
+    except Exception as e:
+        logger.error(f"Ошибка при проверке сервиса {service['name']}: {str(e)}")
+        return False
+
+async def async_check_llm_services() -> bool:
+    """Асинхронная проверка доступности LLM сервисов"""
     services = [
         {"name": "Sentiment LLM", "url": LLM_SENTIMENT_URL},
         {"name": "Topics LLM", "url": LLM_TOPICS_URL},
         {"name": "Entity LLM", "url": LLM_ENTITY_URL}
     ]
     
-    all_available = True
-    
     async with aiohttp.ClientSession() as session:
-        tasks = []
-        for service in services:
-            health_url = service["url"].replace("/generate", "/health")
-            tasks.append(check_service(session, service, health_url))
-        
+        tasks = [check_service(session, service, service["url"].replace("/generate", "/health")) 
+                for service in services]
         results = await asyncio.gather(*tasks)
-        all_available = all(results)
-    
+        
+    all_available = all(results)
     if not all_available:
         logger.warning("Некоторые LLM-сервисы недоступны. Проверьте конфигурацию.")
     
     return all_available
 
-async def check_service(session, service, health_url):
-    """Проверяет доступность одного сервиса"""
-    try:
-        async with session.get(health_url, timeout=3) as response:
-            if response.status == 200:
-                logger.info(f"Сервис {service['name']} доступен по URL {service['url']}")
-                return True
-            else:
-                logger.error(f"Сервис {service['name']} недоступен, статус: {response.status}")
-                return False
-    except Exception as e:
-        logger.error(f"Ошибка при проверке сервиса {service['name']}: {str(e)}")
-        return False
-
-def check_llm_services():
-    """Синхронная обертка для проверки сервисов"""
+def check_llm_services() -> bool:
+    """Проверка доступности сервисов"""
     return run_async_in_thread(async_check_llm_services)
-    
-def write_to_mongo(batch_df, _):
-    """Записывает пакет данных в MongoDB с обработкой дубликатов"""
-    try:
-        import pandas as pd
-        from datetime import datetime
 
+def write_to_mongo(batch_df, _) -> None:
+    """Запись пакета данных в MongoDB"""
+    try:
         rows = batch_df.collect()
         pdf = pd.DataFrame([row.asDict() for row in rows])
 
@@ -550,9 +507,7 @@ def write_to_mongo(batch_df, _):
 
         for col in pdf.columns:
             if pd.api.types.is_datetime64_any_dtype(pdf[col]):
-                pdf[col] = pdf[col].apply(
-                    lambda x: x.isoformat() if pd.notnull(x) else None
-                )
+                pdf[col] = pdf[col].apply(lambda x: x.isoformat() if pd.notnull(x) else None)
 
         records = []
         for record in pdf.to_dict('records'):
@@ -566,12 +521,13 @@ def write_to_mongo(batch_df, _):
         if not records:
             logger.info("Нет записей для записи в MongoDB")
             return
-        
 
-        mongo = MongoClient(MONGODB_URI)
+        mongo = MongoClient(MONGODB_URI, 
+                          maxPoolSize=100,  # Увеличен размер пула соединений
+                          connectTimeoutMS=2000,  # Уменьшен timeout
+                          socketTimeoutMS=5000)
         db = mongo[MONGODB_DB]
         collection = db.messages
-
 
         try:
             collection.create_index(
@@ -582,7 +538,7 @@ def write_to_mongo(batch_df, _):
         except Exception as e:
             logger.debug(f"Индекс уже существует или ошибка создания: {str(e)}")
 
-        batch_size = 100
+        batch_size = 200  # Увеличен размер батча
         total_processed = 0
         
         for i in range(0, len(records), batch_size):
@@ -616,8 +572,8 @@ def write_to_mongo(batch_df, _):
     except Exception as e:
         logger.error(f"Критическая ошибка при записи в MongoDB: {str(e)}")
 
-
-def main():
+def main() -> None:
+    """Основная функция обработки новостей"""
     check_llm_services()
     
     sentiment_udf = udf(llm_sentiment, StringType())
@@ -628,20 +584,31 @@ def main():
     
     spark = SparkSession.builder \
         .appName("NewsFeedProcessor") \
-        .config("spark.jars.packages",
-            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1," 
-            "org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0," 
-            "org.mongodb.spark:mongo-spark-connector_2.12:3.0.1") \
-        .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
+        .config("spark.jars.packages", 
+                "" if JARS_AVAILABLE else 
+                "org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1," 
+                "org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0," 
+                "org.mongodb.spark:mongo-spark-connector_2.12:3.0.1") \
+        .config("spark.jars", 
+                ",".join([os.path.join(JARS_DIR, f) for f in os.listdir(JARS_DIR)]) 
+                if JARS_AVAILABLE else "") \
+        .config("spark.jars.excludes", "javax.ws.rs:javax.ws.rs-api") \
         .config("spark.driver.memory", DRIVER_MEMORY) \
         .config("spark.executor.memory", EXECUTOR_MEMORY) \
         .config("spark.sql.streaming.checkpointLocation", CHECKPOINT_DIR) \
-        .config("spark.sql.shuffle.partitions", os.cpu_count() * 2) \
+        .config("spark.sql.shuffle.partitions", max(os.cpu_count(), 4)) \
         .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
-        .config("spark.kryoserializer.buffer.max", "1024m") \
-        .config("spark.streaming.kafka.consumer.poll.ms", "2000") \
+        .config("spark.kryoserializer.buffer.max", "128m") \
+        .config("spark.streaming.kafka.consumer.poll.ms", "500") \
         .config("spark.streaming.backpressure.enabled", "true") \
+        .config("spark.streaming.kafka.maxRatePerPartition", "5000") \
+        .config("spark.streaming.concurrentJobs", "4") \
+        .config("spark.default.parallelism", max(os.cpu_count() * 2, 8)) \
+        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
+        .config("spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2") \
         .getOrCreate()
+
+    
     spark.sparkContext.setLogLevel("WARN")
     
     logger.info(f"Настройка чтения из Kafka топика {KAFKA_TOPIC}")
@@ -651,6 +618,9 @@ def main():
         .option("subscribe", KAFKA_TOPIC) \
         .option("startingOffsets", "latest") \
         .option("failOnDataLoss", "false") \
+        .option("maxOffsetsPerTrigger", 10000) \
+        .option("fetchOffset.numRetries", 8) \
+        .option("kafkaConsumer.pollTimeoutMs", 1000) \
         .load()
 
     parsed = df.select(
@@ -676,10 +646,13 @@ def main():
         .option("es.resource", f"{ELASTICSEARCH_NEWS_INDEX}/_doc") \
         .option("es.nodes", ELASTICSEARCH_HOST) \
         .option("es.port", ELASTICSEARCH_PORT) \
-        .option("es.batch.size.entries", "1000") \
+        .option("es.batch.size.entries", "2000") \
+        .option("es.batch.write.retry.count", "3") \
+        .option("es.batch.write.retry.wait", "5") \
+        .option("es.nodes.wan.only", "true") \
         .option("checkpointLocation", f"{CHECKPOINT_DIR}/es") \
         .outputMode("append") \
-        .trigger(processingTime="10 seconds") \
+        .trigger(processingTime="5 seconds") \
         .start()
 
     logger.info(f"Настройка записи в MongoDB: {MONGODB_URI}/{MONGODB_DB}")
@@ -689,7 +662,7 @@ def main():
     mongo_query = enriched.writeStream \
         .foreachBatch(write_to_mongo) \
         .option("checkpointLocation", f"{CHECKPOINT_DIR}/mongo") \
-        .trigger(processingTime="15 seconds") \
+        .trigger(processingTime="5 seconds") \
         .start()
 
     logger.info("Запуск процессора. Ожидание данных...")

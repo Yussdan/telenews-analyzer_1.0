@@ -16,6 +16,7 @@ except Exception as e:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Конфигурация модели
 MODEL_PATH = os.getenv("MODEL_PATH", "/app/models/model.gguf")
 CONTEXT_SIZE = int(os.getenv("CONTEXT_SIZE", "1024"))
 MODEL_TYPE = os.getenv("MODEL_TYPE", "llama").lower()
@@ -28,12 +29,15 @@ ROPE_FREQ_BASE = float(os.getenv("ROPE_FREQ_BASE", "10000.0"))
 MAX_TOKENS_DEFAULT = int(os.getenv("MAX_TOKENS_DEFAULT", "512"))
 USE_MLOCK = int(os.getenv("USE_MLOCK", "1")) > 0
 MUL_MAT_Q = int(os.getenv("MUL_MAT_Q", "1")) > 0
+
+# Параметры генерации по умолчанию
 TFS_Z = float(os.getenv("TFS_Z", "1.0"))
 TYPICAL_P = float(os.getenv("TYPICAL_P", "1.0"))
 MIROSTAT_MODE = int(os.getenv("MIROSTAT_MODE", "0"))
 MIROSTAT_TAU = float(os.getenv("MIROSTAT_TAU", "5.0"))
 MIROSTAT_ETA = float(os.getenv("MIROSTAT_ETA", "0.1"))
 
+# Системные параметры
 OPTIMAL_CORE_COUNT = min(os.cpu_count() or 1, 6)
 PHYSICAL_CORES = psutil.cpu_count(logical=False) or 1
 REPORT_MAX_NEWS = int(os.getenv("REPORT_MAX_NEWS", "3"))
@@ -48,6 +52,7 @@ class GenerationTimeout(Exception):
     pass
 
 def cleanup_memory():
+    """Очистка памяти и возврат неиспользуемой памяти системе"""
     gc.collect()
     if os.name == 'posix':
         try:
@@ -59,6 +64,7 @@ def cleanup_memory():
             logger.debug(f"malloc_trim: {e}")
 
 def load_model():
+    """Загрузка и инициализация модели"""
     global model, model_ready
     with model_lock:
         try:
@@ -70,6 +76,7 @@ def load_model():
 
             n_threads = min(LLAMA_THREADS, PHYSICAL_CORES)
             logger.info(f"Загрузка модели из {MODEL_PATH} с n_threads={n_threads}, n_batch={LLAMA_BATCH_SIZE}")
+            
             params = {
                 "model_path": MODEL_PATH,
                 "n_ctx": CONTEXT_SIZE,
@@ -90,17 +97,13 @@ def load_model():
 
             model = Llama(**params)
 
-            _ = model.create_completion(
-                "Проверка загрузки модели.",
-                max_tokens=5,
-                temperature=0.1
-            )
-
-            _ = model.create_completion(
-                "Повторный прогрев модели для улучшения производительности.",
-                max_tokens=10,
-                temperature=0.1
-            )
+            # Прогрев модели для стабильной работы
+            for prompt in ["Проверка загрузки модели.", "Повторный прогрев модели для улучшения производительности."]:
+                _ = model.create_completion(
+                    prompt,
+                    max_tokens=10,
+                    temperature=0.1
+                )
             
             logger.info(f"Модель {MODEL_TYPE} успешно загружена и оптимизирована!")
             model_ready = True
@@ -111,8 +114,9 @@ def load_model():
             return False
 
 def periodic_cleanup():
+    """Периодическая очистка памяти"""
     while True:
-        time.sleep(300)
+        time.sleep(300)  # 5 минут
         logger.debug("Периодическая очистка памяти")
         cleanup_memory()
 
@@ -121,6 +125,7 @@ cleanup_thread.start()
 
 @app.route("/health", methods=["GET"])
 def health_check():
+    """Проверка состояния сервиса"""
     cpu_percent = psutil.cpu_percent(interval=0.1)
     memory = psutil.virtual_memory()
     memory_percent = memory.percent
@@ -144,6 +149,7 @@ def health_check():
 
 @app.route("/generate", methods=["POST"])
 def generate():
+    """Генерация текста с помощью модели"""
     global model, model_ready
     if not model_ready:
         return jsonify({"error": "Модель еще загружается", "status": "loading"}), 503
@@ -159,6 +165,7 @@ def generate():
 
         logger.info(f"Получен промпт (длина: {len(prompt)}): {prompt[:200]}...")
 
+        # Настройка параметров генерации
         max_tokens = min(int(data.get("max_tokens", MAX_TOKENS_DEFAULT)), CONTEXT_SIZE - 100)
         temperature = float(data.get("temperature", 0.7))
         top_p = float(data.get("top_p", 0.9))
@@ -170,6 +177,7 @@ def generate():
 
         is_report = data.get("is_report", False)
 
+        # Оптимизированные параметры для отчетов
         if is_report:
             temperature = min(temperature, 0.6)
             top_p = 0.85
@@ -184,6 +192,7 @@ def generate():
             mirostat_tau = MIROSTAT_TAU
             mirostat_eta = MIROSTAT_ETA
 
+        # Проверка длины промпта
         max_prompt_length = CONTEXT_SIZE * 2
         if len(prompt) > max_prompt_length and not is_report:
             logger.warning(f"Промпт слишком длинный ({len(prompt)}), обрезаем.")
@@ -250,6 +259,7 @@ def generate():
 
 @app.route("/reload", methods=["POST"])
 def reload_model():
+    """Перезагрузка модели"""
     global model_ready
     model_ready = False
     try:
@@ -263,7 +273,7 @@ def reload_model():
 if __name__ == "__main__":
     try:
         import os
-        os.nice(-10)
+        os.nice(-10)  # Повышаем приоритет процесса
     except:
         pass
 
